@@ -18,3 +18,7 @@ This is the **jido-skills** repository — a collection of Agent Skills for the 
 - Use `{{command_prefix}}`, `{{model}}`, `{{config_file}}` placeholders for multi-provider support.
 - Run `bun run build` after any source changes to regenerate provider outputs.
 - Run `bun test` to validate skills.
+
+## Release Hygiene
+
+- Do not modify `CHANGELOG.md`; release notes are generated from Git history during release, so keep changes focused on proper Conventional Commits.
