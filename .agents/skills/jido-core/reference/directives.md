@@ -1,164 +1,96 @@
-# Jido Directives Reference
+# Jido Directives and Outcomes Reference (v3)
 
-## What Are Directives?
+Source guides: `directives-and-outcomes.md`, `directives.md`,
+`turns-commit-and-effects.md`, `adopt`/ownership guides.
 
-Directives are **typed effect descriptions** — data structures that declare a side effect without executing it. Actions return directives alongside state updates; the runtime (`AgentServer`) processes them after `cmd/2` completes.
+A Directive is a typed request for runtime work **after** an Agent state
+commit. An Outcome is the terminal record for one admitted Turn.
 
-This separation keeps actions pure and testable while enabling real-world effects.
+## Built-In Directives
 
-```elixir
-# Inside an action's run/2
-{:ok, %{status: :notified}, [
-  %Jido.Directive.Emit{signal: my_signal},
-  %Jido.Directive.Schedule{message: :check_status, delay: 5_000}
-]}
-```
-
-## Directive Types
-
-### Emit
-
-Dispatch a signal to the signal bus.
-
-```elixir
-%Jido.Directive.Emit{
-  signal: %Jido.Signal{
-    type: "order.completed",
-    source: "agent:order-123",
-    data: %{order_id: "abc", total: 99.99}
-  }
-}
-```
-
-Use `Emit` to notify other agents or systems of events. The signal follows the CloudEvents spec.
-
-### Spawn
-
-Spawn a generic BEAM child process under the agent's supervisor.
+| Directive | Operation |
+| --- | --- |
+| `Emit` | Dispatch one Signal through a target |
+| `EmitToParent` | Send a Signal to the logical parent |
+| `EmitToChild` | Send a Signal to a tracked child |
+| `SpawnProcess` | Start an untracked supervised OTP process |
+| `SpawnChild` | Start and track a child Agent |
+| `AdoptChild` | Attach an existing live child |
+| `StopChild` | Stop and remove one tracked child |
+| `Stop` | Stop the current Agent Server |
+| `Error` | Send a structured error to Server policy |
 
 ```elixir
-%Jido.Directive.Spawn{
-  module: MyApp.Workers.FileProcessor,
-  args: [path: "/tmp/upload.csv"],
-  id: "file-worker-1"
-}
+emit = Jido.Agent.Directive.emit(signal, dispatch_target)
+to_child = Jido.Agent.Directive.emit_to_child(:worker, signal)
+child = Jido.Agent.Directive.spawn_child(MyApp.Worker, :worker)
+process = Jido.Agent.Directive.spawn_process({Task, fn -> do_work() end})
 ```
 
-The child is tracked by the agent's runtime. Use `StopChild` to terminate it.
+- Use `SpawnChild`/`StopChild` for owned Agents by relationship tag.
+- Use `SpawnProcess` only for an untracked supervised OTP process.
+- Prefer `{:error, reason}` when a Turn must fail before commit; the `Error`
+  Directive reports an error to Server policy after commit.
+- V2 names changed: `Spawn`→`SpawnProcess`, `SpawnAgent`→`SpawnChild`.
+  Cron/Schedule/Sensor directives moved to their Plugins. `RunInstruction` has
+  no post-commit replacement; send a later Signal instead.
 
-### SpawnAgent
+## Validate Before Commit
 
-Spawn a child Jido agent as a managed process.
+- Jido validates all built-in and Plugin Directives before commit.
+  Plugin-owned state contributions (`reduce/2`) also run before commit.
+- Runtime dispatch starts only after the complete candidate is valid and any
+  required checkpoint succeeds.
+- A direct `Jido.Agent.cmd/3` call returns the Directive list and does not
+  dispatch it.
+- Custom Directive types are declared by a Plugin Agent facet, which owns
+  `Jido.Agent.Directive.validate/1`; the paired Agent Server facet owns
+  optional post-commit dispatch.
 
-```elixir
-%Jido.Directive.SpawnAgent{
-  module: MyApp.Agents.TaskWorker,
-  id: "task-worker-42",
-  initial_state: %{task_id: "t-42", assigned_to: "agent-1"}
-}
-```
+## Dispatch Behavior
 
-The child agent runs its own `AgentServer` and is supervised by the parent. Parent-child relationships enable hierarchical agent architectures.
+- Directives run after commit, in list order.
+- If one Directive fails, the committed state remains and later Directives in
+  that batch do not run. Ordinary Directives have no crash-replay guarantee.
+- A process or VM can stop after commit and before dispatch completes. Restore
+  does not replay that batch.
+- Ordinary Directive lists are **not** a durable outbox. For durable delivery,
+  save explicit pending work (with stable operation IDs and acknowledgement)
+  or use a durable Signal Bus subscription where that contract fits.
 
-### StopChild
+## Plugin-Defined Directives
 
-Stop a tracked child process (spawned via `Spawn` or `SpawnAgent`).
+A Plugin package can add Directive types. The Agent facet declares them and
+validates them; the Agent Server facet handles optional post-commit dispatch
+with a bounded `Jido.Plugin.DirectiveContext`. The Plugin's paired owned state
+value is available to dispatch. The trust boundary is an API boundary, not a
+sandbox for untrusted BEAM code.
 
-```elixir
-%Jido.Directive.StopChild{
-  id: "task-worker-42"
-}
-```
+## Turn Outcomes
 
-### Schedule
+`Jido.Agent.Turn.Outcome` records:
 
-Send a delayed message to the agent process.
+- Turn and Agent IDs
+- source and effective Signals
+- terminal status and stage
+- state versions before and after the Turn
+- whether the Turn committed
+- Directive completion, failure, and skip counts
+- timing and an optional error
 
-```elixir
-%Jido.Directive.Schedule{
-  message: :timeout_check,
-  delay: 10_000    # milliseconds
-}
-```
+Statuses: `:succeeded`, `:failed`, `:cancelled`, `:timed_out`,
+`:indeterminate`. The first recovery question is always `committed?`. The
+Outcome has no public authoring API and is not domain history.
 
-The message arrives as a signal that the agent can route via `signal_routes`. Use for timeouts, polling, or deferred work.
+## Child Relationships
 
-### Stop
+- `SpawnChild` supports explicit remote placement through `node:`.
+- `AdoptChild` attaches an existing live child; ownership data changed from v2
+  (monitor, creation cause, remote spawn reference). Test local and remote
+  adoption, orphans, and lost replies.
+- `StopChild` identifies the child by relationship tag.
+- `on_parent_death` (default `:stop`) selects child behavior when a logical
+  parent ends.
+- `Stop` commits state before the Server stops.
 
-Stop the agent process gracefully.
-
-```elixir
-%Jido.Directive.Stop{
-  reason: :normal
-}
-```
-
-The agent's `AgentServer` will shut down with the given reason. Use `:normal` for clean shutdowns.
-
-## How the Runtime Processes Directives
-
-After `cmd/2` returns `{agent, directives}`, the `AgentServer` processes each directive in order:
-
-1. **Emit** — publishes the signal via `Jido.Signal.Bus`
-2. **Spawn** — starts the child under the agent's `DynamicSupervisor`
-3. **SpawnAgent** — starts a child `AgentServer` under supervision
-4. **StopChild** — terminates the child and removes tracking
-5. **Schedule** — calls `Process.send_after/3` on the agent process
-6. **Stop** — initiates GenServer shutdown
-
-Directives are processed sequentially in list order. If a directive fails, the error is logged and processing continues with the next directive.
-
-## Returning Directives from Actions
-
-Return directives as the third element of the success tuple:
-
-```elixir
-@impl true
-def run(params, context) do
-  # State update + multiple directives
-  {:ok, %{status: :spawned}, [
-    %Jido.Directive.SpawnAgent{
-      module: WorkerAgent,
-      id: "worker-#{params.task_id}",
-      initial_state: %{task: params.task}
-    },
-    %Jido.Directive.Emit{
-      signal: %Jido.Signal{type: "worker.spawned", data: %{task_id: params.task_id}}
-    }
-  ]}
-end
-```
-
-## Testing Directives
-
-Because directives are plain data, test them by inspecting the return value of `cmd/2`:
-
-```elixir
-test "spawns a worker on task assignment" do
-  {:ok, agent} = TaskManager.new()
-  {_agent, directives} = TaskManager.cmd(agent, {AssignTask, %{task_id: "t-1"}})
-
-  assert [%Jido.Directive.SpawnAgent{id: "worker-t-1"}] = directives
-end
-```
-
-No mocks needed — just assert on the directive structs.
-
-## Custom Directives
-
-Implement the `Jido.Directive` protocol to define custom directive types:
-
-```elixir
-defmodule MyApp.Directives.SendEmail do
-  defstruct [:to, :subject, :body]
-end
-
-defimpl Jido.Directive, for: MyApp.Directives.SendEmail do
-  def execute(directive, agent_state) do
-    MyApp.Mailer.send(directive.to, directive.subject, directive.body)
-    {:ok, agent_state}
-  end
-end
-```
-
-The runtime calls `Jido.Directive.execute/2` for each directive. Custom directives integrate seamlessly with the standard processing pipeline.
+See `reference/runtime.md` for children views and lifecycle.

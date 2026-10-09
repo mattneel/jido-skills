@@ -1,33 +1,45 @@
 {
-  "generatedAt": "2026-04-12T20:50:22.475Z",
+  "generatedAt": "2026-10-09T16:20:58.278Z",
   "skills": {
     "hex-release": {
       "name": "hex-release",
-      "hash": "d06c71d8f4ff169d9c01f2d5928b338a97de4c60ba42839f5c6317937658bcaa"
+      "hash": "8c18449f8f0537a63cb6dcb39936779ed0a15f2cfb384013eb69a5308b97d04f"
     },
     "jido-action": {
       "name": "jido-action",
-      "hash": "35450df16cc3cd48fbfce0f7091d6ab854ee99fc6afdb4b9847078cc4a632138"
+      "hash": "78ccbda7568673e509f7dd2d6dfd65f92c18f28f1e4d657c8ed9a2af3ce66027"
     },
     "jido-agent": {
       "name": "jido-agent",
-      "hash": "4928d4d5636580ca31bf698cdc8e9d722139d747343c2baf6eef70f9d889ec47"
+      "hash": "205f60f180fd4d16ead0dbb326810b280af2e8005ec8c3e533c91f05fb4e5b39"
     },
     "jido-ai": {
       "name": "jido-ai",
-      "hash": "bb9f2b0afced4b5f48502e0df7674ce40c66c2b9008905f211a9b10965ebd165"
+      "hash": "bad11e83abe1f3bf7a1b656331eac34f1d579e1e3ebdca94d04f85c9530b78cc"
     },
     "jido-core": {
       "name": "jido-core",
-      "hash": "95f018f5cd836f946b46f7c6242aaeb90b1c3b2328fa43a846c9b5a855a1be12"
+      "hash": "32cba6bd797e3e56a9e5c761d1a5f3112a4ab1c82354386e1b5dfff36713b8e6"
     },
     "jido-testing": {
       "name": "jido-testing",
-      "hash": "0144525b2a8bdc011b70826731bbe58dad07a4d3edc0837b035a53c781199d5b"
+      "hash": "7d670e79c1363cc6dcde4873d550c2c5d101208b50970d2236a1aee068118b1e"
+    },
+    "pr-harden": {
+      "name": "pr-harden",
+      "hash": "e3fe4dc56ade676b411f888f7e1ce82e9d860ccda3a427431fe59324c4147fae"
     },
     "pr-review": {
       "name": "pr-review",
-      "hash": "272ea6234b2aa87b8b2bb0813d2d30a51ff897792d4dd3e6e53e9c5d3c517aa8"
+      "hash": "616fd1542a29774740d82d10383cf7d9802340f98028d8fa889dd4be663252c6"
+    },
+    "refresh-readme": {
+      "name": "refresh-readme",
+      "hash": "984c192ebe7f0990bdc627e93160cb2481739973466bc28f9133600c7262407a"
+    },
+    "sync-docs-to-code": {
+      "name": "sync-docs-to-code",
+      "hash": "d2585346f9271a86eeafd83b94753a494f74e4b2e01a6fa9aba322e5a22d0b16"
     }
   }
 }

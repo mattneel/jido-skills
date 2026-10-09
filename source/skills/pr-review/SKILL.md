@@ -6,7 +6,7 @@ description: >-
   check if it is ready to merge, or provide PR feedback without editing code.
 metadata:
   author: agentjido
-  version: "0.2.0"
+  version: "0.3.0"
 license: Apache-2.0
 ---
 
@@ -83,8 +83,10 @@ Inspect for:
 - No swallowed errors at system boundaries
 - Public functions documented and specified when repo convention expects it
 - Tests focused on behavior, not implementation details
-- Jido actions kept pure unless the repo explicitly uses another pattern
-- Runtime work delegated to directives, supervisors, or documented boundaries
+- Jido actions and flows return the complete next state for agent turns and
+  keep effects out of decision code unless the repo documents another pattern
+- Runtime work delegated to directives, Plugin runtimes, or documented
+  boundaries; no v2 Strategy, StateOp, or `signal_routes` patterns
 
 ### 5. Decide readiness label
 

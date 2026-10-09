@@ -1,353 +1,213 @@
 ---
 name: jido-agent
 description: >-
-  Build Jido Agents with schema validation, cmd/2 command pattern,
-  plugins, and directives. Use when creating new agents, defining
-  agent schemas, adding plugins, or working with the AgentServer runtime.
+  Build and maintain Jido v3 agent modules: definitions, instances, static
+  state schemas, Signal routes, generated interfaces, plugins, and Agent Server
+  runtime wiring. Use when creating agents, changing agent behavior, or working
+  with live Jido actors.
 metadata:
   author: agentjido
-  version: "0.1.0"
+  version: "0.3.1"
 license: Apache-2.0
 ---
 
-# Building Jido Agents
+# Jido Agent
 
-## MANDATORY PREPARATION
+## Purpose
 
-Invoke /jido-core first — it contains ecosystem context,
-conventions, and core design principles. Follow its guidance before proceeding.
+Create or modify Jido v3 agents while preserving local repo conventions, the
+definition/instance split, the complete-state contract, and the separation
+between pure agent behavior and runtime side effects.
 
-## Overview
+## When To Use
 
-A Jido Agent is an **immutable data structure** that holds state and processes
-commands via `cmd/2`. Agents are pure functions — no GenServer, no side effects.
-The OTP runtime (`AgentServer`) is a separate concern.
+Use this skill for:
 
-Core API:
-- `new/1` — create a new agent
-- `set/2` — update state directly
-- `validate/2` — validate state against schema
-- `cmd/2` — execute actions: `(agent, action) -> {agent, directives}`
+- New `use Jido.Agent` modules
+- Definition and instance construction (`definition/0`, `new/1`,
+  `instantiate/2`)
+- Static state schema changes
+- Route declarations, route defaults, and generated interfaces
+- Plugin declarations and Plugin-owned state
+- Live execution: `Jido.start_agent`, `AgentServer` queries, calls, casts,
+  cancellation
+- Directives, children, persistence, hibernation, and upgrades
+- Debugging route selection, candidate rejections, commits, or directives
 
----
+Invoke `jido-core` first for shared ecosystem context.
 
-## Step 1: Define the Agent Module
+## Requirements
+
+- Read local `AGENTS.md`, `mix.exs`, existing agent modules, and tests before
+  writing examples or code.
+- Confirm the repo runs Jido v3 (`jido ~> 3.0.0-beta.1` or the local checkout).
+  Do not port v2 agent code by renaming alone; follow
+  `jido-core/reference/migration.md`.
+- Use static Zoi data schemas. Do not build schemas dynamically.
+- Keep PIDs, references, functions, and timers out of Agent state; Plugin
+  runtimes own them.
+- Prefer the repo's current agent macro options and route style.
+
+## Workflow
+
+### 1. Inspect existing patterns
+
+Search before designing:
+
+```bash
+rg "use Jido.Agent|routes do|plugin |Jido.start_agent|AgentServer" lib test
+```
+
+Record:
+
+- Current schema style and metadata conventions
+- Route declaration style and generated interfaces
+- Plugin declarations and owned state fields
+- Runtime module names and supervision pattern
+- Test style for direct candidates and live actors
+
+### 2. Define the agent boundary
+
+State clearly:
+
+- What state the agent owns (domain fields; one Plugin owns each Plugin field)
+- Which Signals it handles and which one executable each route selects
+- Which Actions or Flows do the domain work
+- Which effects must return as Directives or move to a Plugin runtime
+- What identity and partition scheme applies
+
+Do not hide external I/O in pure command logic unless the repo already
+documents that pattern. Remember that Actions may perform I/O before commit and
+a later failure cannot undo it.
+
+### 3. Declare the definition
 
 ```elixir
-defmodule MyApp.TaskManager do
-  use Jido.Agent,
-    name: "task_manager",
-    description: "Manages a list of tasks with priorities",
-    schema: [
-      tasks: [type: {:list, :any}, default: []],
-      status: [type: :atom, default: :idle],
-      task_count: [type: :integer, default: 0]
-    ]
+defmodule MyApp.Counter do
+  use Jido.Agent, name: "counter", description: "Counts things"
 
-  def signal_routes(_ctx) do
-    [
-      {"task.add", MyApp.Actions.AddTask},
-      {"task.complete", MyApp.Actions.CompleteTask},
-      {"task.list", MyApp.Actions.ListTasks}
-    ]
+  agent do
+    schema Zoi.object(%{count: Zoi.integer() |> Zoi.default(0)})
+    metadata %{domain: "counters"}
+  end
+
+  routes do
+    signal_source "/counters"
+
+    route "counter.increment", MyApp.Increment do
+      defaults %{amount: 1}
+      define :increment, args: [{:optional, :amount}]
+    end
   end
 end
 ```
 
-### Required Options
+- Declare each field in exactly one place: `use` options or the DSL block.
+- Add `plugin MyApp.Plugin, config: [...]` in the `agent` block for
+  capabilities.
+- Keep metadata portable data; do not put runtime values in it.
 
-| Option        | Type            | Description                          |
-|---------------|-----------------|--------------------------------------|
-| `name`        | `String.t()`   | Snake_case identifier                |
-| `description` | `String.t()`   | What the agent does                  |
-| `schema`      | `keyword()`     | NimbleOptions or Zoi state schema    |
+### 4. Implement state and command behavior
 
-### Optional Options
+- Executables start from `context.agent_state` and return the complete next
+  state. A partial map is not a state patch.
+- Preserve every Plugin-owned key; only the owning facet's `reduce/2` changes
+  it.
+- Route selection uses the first matching target in Router order. Exact routes
+  beat wildcards. No match returns `Jido.Error.RoutingError`.
+- Route defaults merge with Signal data (shallow; Signal wins).
+- Use `Jido.Agent.set/2` for field merges outside a Turn; it validates the
+  complete result and protects Plugin keys.
+- Validate with `validate/1`, `validate_definition/1`, `validate_instance/1`.
+  The v2 `:strict` option is gone.
 
-| Option           | Type        | Description                                 |
-|------------------|-------------|---------------------------------------------|
-| `strategy`       | module/tuple| Execution strategy (default: `Strategy.Direct`) |
-| `plugins`        | list        | Plugin modules or `{module, config}` tuples |
-| `signal_routes`  | list        | Compile-time signal-to-action route table   |
-| `schedules`      | list        | Cron schedules as `{expr, signal_type}`     |
+### 5. Handle directives and runtime
 
----
-
-## Step 2: Configure Schema
-
-Use NimbleOptions (legacy) or Zoi (recommended for new code):
-
-```elixir
-# NimbleOptions
-schema: [
-  status: [type: :atom, default: :idle],
-  counter: [type: :integer, default: 0]
-]
-
-# Zoi (recommended)
-schema: Zoi.object(%{
-  status: Zoi.atom() |> Zoi.default(:idle),
-  counter: Zoi.integer() |> Zoi.default(0)
-})
-```
-
-Both are handled transparently by the Agent module.
-
----
-
-## Step 3: Define Signal Routes
-
-Signal routes map incoming signal types to action modules. AgentServer uses
-these to dispatch signals to `cmd/2`.
+Return Directives as the third success element for effects that belong to the
+runtime:
 
 ```elixir
-def signal_routes(_ctx) do
-  [
-    {"user.created", HandleUserCreated},           # simple mapping
-    {"counter.increment", IncrementAction, 10},    # with priority
-    {"payment.*", LargePaymentAction},             # wildcard
-    {"order.placed", {ProcessOrder, %{notify: true}}}  # with static params
-  ]
-end
+{:ok, next_state, [Jido.Agent.Directive.emit(signal, {:bus, target: MyBus})]}
 ```
 
-Route formats:
-- `{path, ActionModule}` — priority 0
-- `{path, ActionModule, priority}` — explicit priority
-- `{path, {ActionModule, %{params}}}` — with static params
-- `{path, guard_fn, ActionModule, priority}` — with guard function
+Dispatch targets use `target:` (see `jido-core/reference/signals.md`); an
+invalid target rejects the Turn before commit. For buses, the Agent Server
+inherits the Jido instance scope, so start the Bus with the same scope
+(`[{Jido.Signal.Bus, name: MyBus, jido: MyApp.Jido}]`) or pass `jido: nil`
+for an unscoped bus.
 
----
+Use `emit`, `emit_to_parent`, `emit_to_child`, `emit_to_pid`, `spawn_child`,
+`spawn_process`, `adopt_child`, `stop_child`, and `stop`. Directives validate
+before commit and dispatch after commit in list order; a dispatch failure does
+not roll back the commit, and ordinary directives are not a durable outbox.
 
-## Step 4: Implement cmd/2 Workflow
+Direct evaluation returns the Directive list without dispatching it. Use a live
+Server when admission, commit, or effects matter. AgentServer tests should come
+after direct candidate tests unless the bug only exists at runtime.
 
-`cmd/2` is the core operation. It accepts actions and returns `{agent, directives}`.
+### 6. Wire live execution
 
 ```elixir
-# Single action
-{agent, directives} = MyApp.TaskManager.cmd(agent, MyApp.Actions.AddTask)
+{:ok, _jido} = Jido.start()
+{:ok, server} = Jido.start_agent(MyApp.Counter, id: "counter-1")
 
-# Action with params
-{agent, directives} = MyApp.TaskManager.cmd(agent, {MyApp.Actions.AddTask, %{title: "Write docs"}})
+{:ok, committed} = Jido.AgentServer.call(server, signal)
+{:ok, committed} = MyApp.Counter.increment(server, 2)   # generated live helper
 
-# List of actions (processed sequentially)
-{agent, directives} = MyApp.TaskManager.cmd(agent, [
-  {MyApp.Actions.AddTask, %{title: "Task 1"}},
-  {MyApp.Actions.AddTask, %{title: "Task 2"}}
-])
+snapshot = Jido.AgentServer.snapshot(server)
+status = Jido.AgentServer.status(server)
+children = Jido.AgentServer.children(server)
 ```
 
-Key invariants:
-- The returned `agent` is **always complete** — no "apply directives" step
-- `directives` are **external effects only** — they never modify agent state
-- `cmd/2` is a **pure function** — same inputs, same outputs
+- `start_agent` waits for Plugin readiness and required initial persistence.
+- Use `send_request/3` + `receive_response/2` when sending and waiting must be
+  separate; `cancel/2` or `cancel_turn/3` for cancellation.
+- `attach/2`, `detach/2`, and `touch/1` control idle shutdown.
+- `Jido.AgentServer.upgrade/3` migrates a committed Agent to a target module
+  with the same identity and Plugin declarations.
+- Add the instance module to the supervision tree; v3 has no installer
+  generators.
 
----
+### 7. Validate
 
-## Step 5: Understand Directives
+Run the narrowest meaningful tests first, then repo-standard validation:
 
-Directives describe effects for the runtime to interpret. They are bare structs:
-
-| Directive                    | Purpose                                |
-|------------------------------|----------------------------------------|
-| `%Directive.Emit{}`         | Dispatch a signal via Signal.Dispatch  |
-| `%Directive.Error{}`        | Signal an error                        |
-| `%Directive.Spawn{}`        | Spawn a child process                  |
-| `%Directive.Schedule{}`     | Schedule a delayed message             |
-| `%Directive.RunInstruction{}`| Execute instruction at runtime        |
-| `%Directive.Stop{}`         | Stop the agent process                 |
-
-Emit with dispatch targets:
-
-```elixir
-%Directive.Emit{signal: my_signal}                           # default
-%Directive.Emit{signal: my_signal, dispatch: {:pubsub, topic: "events"}}
-%Directive.Emit{signal: my_signal, dispatch: {:pid, target: pid}}
+```bash
+mix test path/to/agent_test.exs
+mix test
 ```
 
----
+If the repo documents a quality alias, run it after tests. For live tests use a
+unique named Jido instance per test and explicit monitors/replies instead of
+sleeps.
 
-## Step 6: Add Plugins
+## Output Expectations
 
-Plugins provide reusable capabilities with isolated state:
+Report:
 
-```elixir
-defmodule MyApp.TaskManager do
-  use Jido.Agent,
-    name: "task_manager",
-    plugins: [
-      MyApp.Plugins.AuditLog,
-      {MyApp.Plugins.RateLimit, %{max_per_minute: 100}}
-    ],
-    schema: [
-      tasks: [type: {:list, :any}, default: []]
-    ]
-end
-```
+- Agent modules changed or added
+- Definition, schema, and route behavior affected
+- Plugin and owned-state changes
+- Runtime/directive behavior added or changed
+- Tests run and what they prove
 
-Plugins implement `Jido.Plugin` behaviour with callbacks: `plugin_spec/1`,
-`handle_signal/2`, `transform_result/3`, and `child_spec/1`.
+## Guardrails
 
----
+- Do not use v2 APIs: `signal_routes`, Strategy modules, `StateOp`/`StateOps`,
+  `cmd` with Actions or lists, partial state patches, `Jido.Await`,
+  `Jido.Scheduler`, `Jido.Sensor`, or `Jido.Storage`.
+- Do not build `%Jido.Agent{}` by hand and assume it is valid; use
+  `new/1`, `new!/1`, or `instantiate/2`.
+- Do not create a GenServer when an Agent plus Agent Server already fits.
+- Do not add side effects to pure state-transition code without explicit repo
+  precedent, and never inside schema refinements or Plugin `prepare/2`.
+- Do not change public agent behavior without regression tests.
+- Do not broaden plugin or route scope beyond the task.
 
-## Step 7: Lifecycle Hooks
+## Reference Docs
 
-Agents support two optional pure callbacks:
-
-```elixir
-def on_before_cmd(agent, action) do
-  # Pre-processing: mirror params, enforce guards
-  {:ok, agent, action}
-end
-
-def on_after_cmd(agent, action, directives) do
-  # Post-processing: validate state, derive computed fields
-  {:ok, agent, directives}
-end
-```
-
----
-
-## Step 8: Run with AgentServer
-
-For production, wrap agents in `AgentServer` — the OTP GenServer runtime:
-
-```elixir
-# Start under DynamicSupervisor
-{:ok, pid} = Jido.AgentServer.start(agent: MyApp.TaskManager)
-
-# Start linked
-{:ok, pid} = Jido.AgentServer.start_link(
-  agent: MyApp.TaskManager,
-  id: "task-mgr-1",
-  initial_state: %{status: :active}
-)
-
-# Send signals
-:ok = Jido.AgentServer.call(pid, signal, timeout)
-:ok = Jido.AgentServer.cast(pid, signal)
-
-# Get state
-{:ok, state} = Jido.AgentServer.state(pid)
-```
-
-Signal flow: `Signal → AgentServer → route → Agent.cmd/2 → {agent, directives} → drain loop`
-
----
-
-## Common Patterns
-
-### State Machine (FSM Strategy)
-
-Use a strategy to enforce state transitions:
-
-```elixir
-use Jido.Agent,
-  name: "order_agent",
-  strategy: {MyApp.OrderFSM, %{initial: :pending}},
-  schema: [
-    status: [type: :atom, default: :pending],
-    items: [type: {:list, :any}, default: []]
-  ]
-```
-
-### Parent-Child Hierarchies
-
-Jido supports logical parent-child relationships (not OTP supervision):
-
-```elixir
-{:ok, parent_pid} = Jido.AgentServer.start(agent: ParentAgent)
-{:ok, child_pid} = Jido.AgentServer.start(
-  agent: ChildAgent,
-  parent: parent_pid,
-  on_parent_death: :emit_orphan
-)
-```
-
----
-
-## Complete Example: Task Manager Agent
-
-```elixir
-defmodule MyApp.Actions.AddTask do
-  use Jido.Action,
-    name: "add_task",
-    description: "Adds a task to the list",
-    schema: [
-      title: [type: :string, required: true],
-      priority: [type: :atom, default: :normal]
-    ]
-
-  @impl true
-  def run(params, _context) do
-    task = %{
-      id: System.unique_integer([:positive]),
-      title: params.title,
-      priority: params.priority,
-      completed: false
-    }
-    {:ok, %{
-      tasks: :append,
-      _append_tasks: task,
-      task_count: :increment
-    }}
-  end
-end
-
-defmodule MyApp.Actions.CompleteTask do
-  use Jido.Action,
-    name: "complete_task",
-    description: "Marks a task as completed",
-    schema: [
-      task_id: [type: :integer, required: true]
-    ]
-
-  @impl true
-  def run(params, context) do
-    tasks = context.state.tasks
-    updated = Enum.map(tasks, fn
-      %{id: id} = t when id == params.task_id -> %{t | completed: true}
-      t -> t
-    end)
-    {:ok, %{tasks: updated}}
-  end
-end
-
-defmodule MyApp.TaskManager do
-  use Jido.Agent,
-    name: "task_manager",
-    description: "Manages tasks with priorities",
-    schema: [
-      tasks: [type: {:list, :any}, default: []],
-      status: [type: :atom, default: :idle],
-      task_count: [type: :integer, default: 0]
-    ]
-
-  def signal_routes(_ctx) do
-    [
-      {"task.add", MyApp.Actions.AddTask},
-      {"task.complete", MyApp.Actions.CompleteTask}
-    ]
-  end
-end
-```
-
----
-
-## DO / DON'T
-
-### DO
-
-- **Keep agents focused on one domain.** One agent = one bounded context.
-- **Use schema validation for all state.** Define every field with types and defaults.
-- **Test agents as pure functions first.** Call `cmd/2` on structs before testing with AgentServer.
-- **Return directives for side effects.** Let the runtime handle I/O.
-- **Use `signal_routes/1`** to map signals to actions declaratively.
-
-### DON'T
-
-- **Put side effects in actions used inside cmd/2.** Use directives to describe effects; let AgentServer execute them.
-- **Access external state in cmd/2.** The agent should only use its own state and action params.
-- **Skip schema validation.** Unvalidated state leads to subtle runtime bugs.
-- **Use `{:stop, ...}` from DirectiveExec** for normal completion — use state-based completion instead.
-- **Mutate agent state outside cmd/2 or set/2.** Always go through the defined API.
+- `jido-core/reference/agents.md` for the full authoring contract
+- `jido-core/reference/plugins.md` for plugin facets and owned state
+- `jido-core/reference/runtime.md` for instances, Server, persistence
+- `jido-core/reference/directives.md` for directive and outcome semantics
+- `jido-core/reference/topology.md` for static systems
