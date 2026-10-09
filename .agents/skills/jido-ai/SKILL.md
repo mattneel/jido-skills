@@ -1,314 +1,314 @@
 ---
 name: jido-ai
 description: >-
-  Integrate AI/LLM capabilities into Jido agents using jido_ai and req_llm.
-  Use when adding AI features to agents, setting up LLM providers, implementing
-  chat agents, tool calling, or multi-modal input/output.
+  Build AI agents on the Jido v3 line with jido_ai: AI profiles, tools,
+  structured results, streaming, sessions, controls, and deterministic tests.
+  Use when adding LLM behavior, model profiles, tool calling, or prompt work to
+  a Jido project.
 metadata:
   author: agentjido
-  version: "0.1.0"
+  version: "0.3.2"
 license: Apache-2.0
-compatibility: Requires jido_ai and req_llm packages
 ---
 
-# AI Integration with Jido
+# Jido AI
 
-## MANDATORY PREPARATION
+## Purpose
 
-Invoke $jido-core first — it contains ecosystem context,
-conventions, and core design principles. Follow its guidance before proceeding.
+Add or maintain AI behavior in Jido v3 projects with explicit profiles,
+bounded execution, validated results, and no provider assumptions baked into
+Agent source.
 
-## Overview
+## When To Use
 
-`jido_ai` provides AI/LLM integration for Jido agents, built on `req_llm`.
-It offers:
+Use this skill for:
 
-- Model aliases for semantic model references (`:fast`, `:capable`, `:thinking`)
-- High-level generation facades (`generate_text`, `generate_object`, `stream_text`)
-- `Jido.AI.Agent` macro for building ReAct-based AI agents
-- Tool calling: expose `Jido.Action` modules as LLM-callable tools
-- Request tracking with async `ask/await` pattern
+- New `use Jido.AI.Agent` modules
+- AI profiles: models, instructions, reasoning methods
+- Tool calling with Jido actions and flows
+- Structured results, schemas, and repair
+- Streaming, steering, and cancellation
+- Sessions, Threads, Context lanes, and checkpoint/resume
+- Controls, tool policy, quotas, and observability
+- Testing AI agents without live providers
 
----
+Invoke `jido-core` first for shared ecosystem context.
 
-## Step 1: Add Dependencies
+## Requirements
 
-```elixir
-# mix.exs
-defp deps do
-  [
-    {:jido, "~> 2.0"},
-    {:jido_ai, "~> 2.0"},
-    {:req_llm, "~> 1.9"}
-  ]
-end
+- Inspect local `mix.exs`, config, and existing AI modules first.
+- The v3 AI stack is **not published to Hex**. Hex `jido_ai 2.x` is the v2
+  line; `{:jido_ai, "~> 2.3"}` pulls v2 packages, not v3 behavior.
+- Install `jido_ai` from git `release/v3` and mirror the pinned git refs from
+  that branch's `mix.exs`; the refs move together. Current set (`jido_ai`
+  `release/v3` at `1f19ff2`; refresh before use):
+
+  ```elixir
+  {:jido_ai,     git: "https://github.com/agentjido/jido_ai.git",     ref: "1f19ff262081bc13eb30da7bff8bfe42685d63c8", override: true},
+  {:jido,        git: "https://github.com/agentjido/jido.git",        ref: "8322de574c53d5c2096243d230c9de4f14803bda", override: true},
+  {:jido_action, git: "https://github.com/agentjido/jido_action.git", ref: "19c77f94e5c2513b2e684a289857fcd568f7eb29", override: true},
+  {:jido_signal, git: "https://github.com/agentjido/jido_signal.git", ref: "fd8d00555d6a64b4109619f4c26f1b75e8a91d41", override: true},
+  {:zoi,         git: "https://github.com/mikehostetler/zoi.git",     ref: "2fff2a23e23e7ac0b26f62f49bbc1b12f7818ac9", override: true}
+  ```
+- Mixing Hex core pins (`jido ~> 3.0.0-beta.1` and friends) with git
+  `jido_ai` fails `mix deps.get` with "dependency jido … is overriding a
+  child dependency". Use the pinned git set above and treat it as
+  **unreleased**: this `jido` ref is newer than the `3.0.0-beta.1` tag, so
+  some core behavior differs from the beta packages.
+- The pinned `jido_action` ref is also newer than the Hex betas: it keeps
+  `to_json/0` and `run_async`/`await`/`cancel`, and has no `max_attempts`.
+  The "Not In the Published Beta" list in `jido-core/reference/actions.md`
+  describes Hex packages; verify against the pinned git ref when the AI
+  stack is in use.
+- Treat API keys and provider secrets as environment/runtime configuration,
+  never source-controlled values.
+- Keep runtime values (PIDs, clients, request handles) out of Agent state.
+- Default tests must not depend on live providers.
+
+## Workflow
+
+### 1. Inspect the local AI setup
+
+```bash
+rg "Jido.AI|MockLLM|req_llm|model|ai :|ask_sync|ask_stream" mix.exs config lib test
 ```
 
----
+Record:
 
-## Step 2: Configure LLM Providers
+- Dependencies and pinned refs (jido_ai release/v3 pins jido from git)
+- Provider configuration and model alias conventions
+- Existing AI agents and their profile style
+- Tool registration and result-mapping patterns
+- Test mocking strategy (typically `Jido.AI.Test.MockLLM`)
 
-Set API keys and model aliases in your config:
+### 2. Start with one profile
 
-```elixir
-# config/config.exs
-config :req_llm,
-  anthropic: [api_key: System.get_env("ANTHROPIC_API_KEY")],
-  openai: [api_key: System.get_env("OPENAI_API_KEY")],
-  google: [api_key: System.get_env("GOOGLE_API_KEY")]
-
-# config/config.exs
-config :jido_ai,
-  model_aliases: %{
-    fast: "anthropic:claude-sonnet-4-20250514",
-    capable: "anthropic:claude-sonnet-4-20250514",
-    thinking: "anthropic:claude-sonnet-4-20250514"
-  }
-```
-
-### Model Aliases
-
-Use semantic aliases instead of hardcoded model strings:
+An AI Agent is a Jido Agent plus an AI profile. The Agent owns durable domain
+state; the profile states the model, reasoning, tools, controls, and result
+destination.
 
 ```elixir
-Jido.AI.resolve_model(:fast)      # => "anthropic:claude-sonnet-4-20250514"
-Jido.AI.resolve_model(:capable)   # => "anthropic:claude-sonnet-4-20250514"
-Jido.AI.model_aliases()           # => all configured aliases
-```
+defmodule MyApp.AnswerAgent do
+  use Jido.AI.Agent, name: "answer_agent"
 
-### LLM Defaults
+  agent do
+    schema Zoi.object(%{answer: Zoi.string() |> Zoi.default("")})
 
-Configure role-based defaults for generation helpers:
+    ai :assistant do
+      model "openai:gpt-4o-mini"
+      instructions "Answer in one short sentence."
 
-```elixir
-config :jido_ai,
-  llm_defaults: %{
-    text: %{model: :fast, temperature: 0.2, max_tokens: 1024},
-    object: %{model: :thinking, temperature: 0.0, max_tokens: 1024},
-    stream: %{model: :fast, temperature: 0.2, max_tokens: 1024}
-  }
-```
+      controls do
+        timeout 10_000
+        max_model_calls 1
+      end
 
----
+      result into: :answer
+    end
+  end
 
-## Step 3: Using Generation Facades
+  routes do
+    signal_source "/my_app"
 
-`Jido.AI` provides thin wrappers over `ReqLLM.Generation`:
-
-```elixir
-# Simple text generation
-{:ok, response} = Jido.AI.generate_text("Summarize this in one sentence.")
-
-# Structured object generation
-{:ok, json} = Jido.AI.generate_object("Extract fields from this text", schema)
-
-# Streaming text
-{:ok, stream} = Jido.AI.stream_text("Stream this response")
-
-# With explicit model and options
-{:ok, response} = Jido.AI.generate_text("Hello",
-  model: :capable,
-  temperature: 0.5,
-  max_tokens: 2048
-)
-```
-
----
-
-## Step 4: Build AI Agents
-
-Use `Jido.AI.Agent` to create agents with the ReAct strategy:
-
-```elixir
-defmodule MyApp.WeatherAgent do
-  use Jido.AI.Agent,
-    name: "weather_agent",
-    description: "Answers weather questions using tools",
-    tools: [MyApp.Actions.GetWeather, MyApp.Actions.GetForecast],
-    system_prompt: "You are a weather expert. Use tools to look up weather data.",
-    model: :fast,
-    max_iterations: 10,
-    max_tokens: 4096,
-    streaming: true
-end
-```
-
-### AI Agent Options
-
-| Option              | Default     | Description                           |
-|---------------------|-------------|---------------------------------------|
-| `name`              | required    | Agent name                            |
-| `tools`             | required    | List of `Jido.Action` modules as tools|
-| `description`       | auto        | Agent description                     |
-| `system_prompt`     | none        | System prompt for the LLM             |
-| `model`             | `:fast`     | Model alias or direct spec            |
-| `max_iterations`    | `10`        | Max ReAct reasoning iterations        |
-| `max_tokens`        | `4096`      | Max tokens per LLM response           |
-| `streaming`         | `true`      | Stream LLM responses                  |
-| `tool_timeout_ms`   | `15_000`    | Per-attempt tool execution timeout    |
-| `tool_max_retries`  | `1`         | Retries for tool failures             |
-| `tool_context`      | `%{}`       | Context map passed to all tools       |
-
----
-
-## Step 5: Interact with AI Agents
-
-### Async Pattern (Preferred)
-
-```elixir
-{:ok, pid} = Jido.AgentServer.start(agent: MyApp.WeatherAgent)
-
-# Send query — returns immediately with a request handle
-{:ok, request} = MyApp.WeatherAgent.ask(pid, "What's the weather in Tokyo?")
-
-# Await the result
-{:ok, answer} = MyApp.WeatherAgent.await(request, timeout: 30_000)
-```
-
-### Sync Convenience
-
-```elixir
-{:ok, answer} = MyApp.WeatherAgent.ask_sync(pid, "What's the weather in Tokyo?",
-  timeout: 30_000
-)
-```
-
-### Per-Request Tool Context
-
-```elixir
-{:ok, request} = MyApp.WeatherAgent.ask(pid, "Get my preferences",
-  tool_context: %{actor: current_user, tenant_id: "acme"}
-)
-```
-
----
-
-## Step 6: Tool Calling
-
-Any `Jido.Action` can serve as an LLM tool. Define actions with descriptive
-`doc` strings in the schema — these become the tool parameter descriptions:
-
-```elixir
-defmodule MyApp.Actions.GetWeather do
-  use Jido.Action,
-    name: "get_weather",
-    description: "Gets current weather for a location",
-    schema: [
-      location: [type: :string, required: true, doc: "City or location name"],
-      units: [type: {:in, [:celsius, :fahrenheit]}, default: :celsius, doc: "Temperature units"]
-    ]
-
-  @impl true
-  def run(params, _context) do
-    # Call weather API
-    {:ok, %{temperature: 22, conditions: "sunny", location: params.location}}
+    route "my_app.answer", ai: :assistant, as: :answer
   end
 end
-
-# Convert to tool spec for LLM consumption
-MyApp.Actions.GetWeather.to_tool()
 ```
 
-### Runtime Tool Management
-
-Register and unregister tools dynamically on running agents:
-
 ```elixir
-{:ok, agent} = Jido.AI.register_tool(agent_pid, MyApp.Tools.Calculator)
-{:ok, agent} = Jido.AI.unregister_tool(agent_pid, "calculator")
-{:ok, tools}  = Jido.AI.list_tools(agent_pid)
-{:ok, true}   = Jido.AI.has_tool?(agent_pid, "calculator")
+{:ok, _jido} = Jido.start()
+{:ok, server} = Jido.start_agent(MyApp.AnswerAgent)
+{:ok, answer} = MyApp.AnswerAgent.ask_sync(server, "What is Jido AI?")
 ```
 
----
+- A module definition does not start a process or call a model.
+- A route that declares `as:` (or `define`) requires `signal_source` in the
+  same `routes` block, or compilation fails with
+  `signal_source is required for as:`.
+- `ask_sync/3` waits; `ask/3` returns a request handle; `ask_stream/3` returns a
+  handle plus an event stream. A core `as:` route also generates
+  `answer_signal/1..2` (input map, optional opts).
+- Keep one profile and one route until a second behavior is justified.
+- Always set a timeout and a model-call limit so a provider cannot make the
+  turn unbounded.
 
-## Step 7: Agent-as-Team Patterns
+### 3. Choose models and instructions deliberately
 
-Compose multiple specialized agents for complex workflows:
+- `model :fast` is an application-configured alias; keep provider choice out
+  of Agent source when it is operational policy. A request-scoped model input
+  changes one request, not the profile.
+- Instructions state the task and output expectations. They are **not** a
+  security or cost boundary: enforce tool access with policy, result shape
+  with `result` validation, and cost with controls/quotas.
+- Several profiles are for distinct work (for example `:answer` and
+  `:review`), each with its own route.
+
+### 4. Add tools
 
 ```elixir
-defmodule MyApp.ResearchAgent do
-  use Jido.AI.Agent,
-    name: "research_agent",
-    description: "Researches topics using multiple sources",
-    tools: [MyApp.Actions.WebSearch, MyApp.Actions.DatabaseQuery],
-    system_prompt: "You are a research assistant. Search multiple sources."
+reasoning :react
+
+tools do
+  action MyApp.Multiply, as: :multiply
+  flow MyApp.BuildQuote, as: :quote
 end
 
-defmodule MyApp.WriterAgent do
-  use Jido.AI.Agent,
-    name: "writer_agent",
-    description: "Writes content based on research",
-    tools: [MyApp.Actions.FormatDocument],
-    system_prompt: "You are a technical writer. Format research into documents."
-end
-```
-
-Use parent-child hierarchies or signal routing to coordinate agents. See the
-Jido Workbench (`jido_workbench`) for working multi-agent examples.
-
----
-
-## Step 8: Error Handling and Rate Limiting
-
-### Error Handling
-
-```elixir
-case MyApp.WeatherAgent.ask_sync(pid, query, timeout: 30_000) do
-  {:ok, answer} ->
-    # Success
-    answer
-
-  {:error, {:timeout, diagnostics}} ->
-    # Timeout — check diagnostics map for server_status, queue_length
-    Logger.warning("Agent timed out: #{inspect(diagnostics)}")
-
-  {:error, reason} ->
-    # Other error
-    Logger.error("Agent error: #{inspect(reason)}")
+controls do
+  timeout 30_000
+  max_iterations 4
+  max_model_calls 4
+  max_tool_calls 3
 end
 ```
 
-### Completion Detection
+- A tool is a Jido Action or Flow, never a bare Elixir call. Keep the `as:`
+  name short and stable.
+- The target must validate input before work starts and return structured,
+  model-readable data. Flows must select their complete output explicitly.
+- Give external I/O a timeout and decide retry safety. A tool can perform
+  effects before the AI answer commits; a failed answer does not undo them.
+- Pass trusted services through request `tool_context`, not Signal, Thread, or
+  Agent state. A model's tool choice is not authorization.
+- Narrow a request with `allowed_tools`; it can only reduce the declared set.
+  Dynamic native tool sources are not part of the stable authoring contract.
 
-Agents signal completion via state, not process death:
+### 5. Shape results
 
 ```elixir
-{:ok, state} = Jido.AgentServer.state(pid)
-case state.agent.state.status do
-  :completed -> state.agent.state.last_answer
-  :failed    -> {:error, state.agent.state.error}
-  _          -> :still_running
+result(Zoi.object(%{answer: Zoi.string() |> Zoi.min(1)}),
+  into: :answer,
+  max_repairs: 1
+)
+```
+
+- `result into:` maps the validated answer to one domain field; unrelated
+  state is preserved.
+- `max_repairs` allows bounded retries with validation feedback. A repair is
+  another model call, so `max_model_calls` must include it.
+- Provider errors do not start schema repair. A failed request leaves the
+  prior domain answer in place; request records may still show the attempt.
+- Validation proves shape, not truth. Add business invariants after shape
+  validation and before commit.
+
+### 6. Pick reasoning and controls
+
+- Default for one answer; `:react` when the model must choose a tool, read its
+  output, and continue.
+- Linear methods (Chain of Thought/Draft) shape one line of reasoning; tree
+  and graph methods explore candidates and cost more calls. Adaptive selection
+  chooses by policy. Compare methods on a measured task, not by name.
+- Controls bound work: `timeout`, `max_iterations`, `max_model_calls`,
+  `max_tool_calls`, plus stage controls (input, model, operation, output) and
+  `steering true`.
+- Put each rule at the earliest stage with enough information; reject input
+  before model work when possible.
+- Controls are not authorization, and a timeout does not make a
+  non-idempotent tool safe to retry.
+
+### 7. Run, observe, and control requests
+
+```elixir
+{:ok, request} = MyApp.Agent.ask(server, "Research the issue")
+{:ok, answer} = Jido.AI.Request.await(request, timeout: 30_000)
+
+{:ok, %{request: r, events: events}} = MyApp.Agent.ask_stream(server, "Review this change")
+```
+
+- The AI Coordinator owns live request work; AgentServer owns committed state.
+  A request can outlive the admitting Turn, and a second AI request to a busy
+  profile can be rejected — it is not queued.
+- `Jido.AI.Orchestration.steer/3` queues a correction for a running request
+  (acceptance means queued, not consumed).
+- `Jido.AI.Orchestration.cancel/2` asks the runtime to stop a request. A
+  caller wait timeout is not cancellation.
+- Use request/run IDs to join admission, events, and settlement. Inspect live
+  state with `Jido.AI.Orchestration.snapshot/2` and committed state with core
+  AgentServer functions.
+
+### 8. Sessions, Threads, and Context
+
+```elixir
+agent do
+  schema Zoi.object(%{
+    reply: Zoi.string() |> Zoi.default(""),
+    messages: Jido.AI.Thread.Projection.schema()
+  })
+
+  ai :assistant do
+    model "openai:gpt-4o-mini"
+    memory history: :messages
+    result into: :reply
+  end
 end
 ```
 
-### Rate Limiting
+- `Jido.Session` is a portable value holding a `Jido.Thread`; a Context is the
+  selected conversation the next model request sees; the live request is
+  runtime work, not a Session value.
+- `memory history: :messages` tells the profile where to find retained
+  conversation. Without it, retained request records do not create context.
+- Raw Threads can hold settlement and application entries; not every entry
+  becomes provider input. Use `Jido.AI.Thread.Projection.select/1` and
+  `messages/1` instead of copying projection rules.
+- Named Context lanes: `Jido.AI.Orchestration.modify_context/3` with
+  `%{type: :replace | :switch}` and a stable `op_id`; repeated applied IDs are
+  idempotent. A change during active work can defer until settlement.
+- Continuation forms: import initial Context with
+  `Jido.AI.Agent.from_initial_state/3` (validates Session, replays nothing);
+  or use an execution checkpoint at a supported ReAct boundary (completed tool
+  results are retained; partial tool batches and effect rollback are not
+  supported).
 
-Use the `request_policy` option to control concurrency:
+### 9. Fail safely
+
+- Classify failures before retrying at the application boundary: transient
+  provider error vs schema/contract problem vs possibly-completed tool effect.
+- Never replay a non-idempotent tool without a key or an application check.
+- Keep new request IDs for independent attempts.
+- Do not treat a caller timeout as proof that the server cancelled work.
+
+### 10. Test deterministically
 
 ```elixir
-use Jido.AI.Agent,
-  name: "rate_limited_agent",
-  request_policy: :reject,  # reject concurrent requests (default)
-  tools: [...]
+{:ok, mock} = Jido.AI.Test.MockLLM.start_link(script: [%{reply: {:text, "Ready"}}])
+context = %{ai: %{assistant: %{options: Jido.AI.Test.MockLLM.options(mock)}}}
+
+{:ok, answer} = MyApp.Agent.ask_sync(server, "Help", context: context)
+%{remaining: [], unexpected: []} = Jido.AI.Test.MockLLM.report(mock)
 ```
 
----
+- Test through AgentServer and the generated `ask` helpers; keep real Flow,
+  Action validation, transport, and state commit. Replace only the remote
+  model with `Jido.AI.Test.MockLLM`.
+- Scripts can return text, objects, tool calls, HTTP errors, or held
+  responses. Use a mock barrier for steering/cancellation; never `sleep`.
+- Assert the committed domain field, not only the returned text, and prove one
+  important failure per agent.
+- Run a small live-provider check only after deterministic tests pass.
 
-## DO / DON'T
+## Output Expectations
 
-### DO
+Report:
 
-- **Use model aliases** (`:fast`, `:capable`) instead of hardcoded model strings.
-- **Add descriptive `doc` to action schemas** — these become LLM tool descriptions.
-- **Use async `ask/await`** for concurrent request handling.
-- **Set appropriate timeouts** for tool execution and streaming.
-- **Keep API keys in environment variables**, never in source code.
+- Profile/model/instruction behavior changed
+- Tools exposed, their contracts, and effect policy
+- Result schema and state destination
+- Limits and quotas applied
+- Tests run, which used mocks, and what they prove
 
-### DON'T
+## Guardrails
 
-- **Hardcode model provider strings** in agent definitions — use aliases.
-- **Skip error handling** on LLM calls — network failures are common.
-- **Use blocking `ask_sync`** in production hot paths — prefer async.
-- **Expose sensitive data in tool context** — filter before passing to LLM.
-- **Ignore token limits** — set `max_tokens` appropriate to your use case.
+- Do not commit API keys, request logs with secrets, or provider responses
+  containing sensitive data. Prompt text is not redaction.
+- Do not put worker PIDs, clients, or request handles in portable Agent state.
+- Do not rely on prompts for tool access, result shape, or cost bounds.
+- Do not add live-network tests to the default suite.
+- Do not change profile behavior without tests that capture the contract.
+- Do not treat a model's tool selection as authorization.
+- Keep content retention (`observability store_content`) off unless an audit
+  or support case requires it.
+
+## Reference Docs
+
+- `jido-core/reference/actions.md` for Action/Flow tool targets
+- `jido-core/reference/runtime.md` for AgentServer request APIs

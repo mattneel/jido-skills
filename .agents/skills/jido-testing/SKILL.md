@@ -1,436 +1,219 @@
 ---
 name: jido-testing
 description: >-
-  Test Jido agents and actions effectively without OTP processes.
-  Use when writing tests for agents, actions, plugins, or signal handling.
-  Covers unit testing, property-based testing, and integration testing patterns.
+  Test Jido v3 actions, flows, plugins, routes, directives, and live actors
+  with focused deterministic coverage. Use when adding tests, fixing test
+  gaps, or validating Jido behavior at the right boundary.
 metadata:
   author: agentjido
-  version: "0.1.0"
+  version: "0.3.1"
 license: Apache-2.0
 ---
 
-# Testing Jido Agents and Actions
+# Jido Testing
 
-## MANDATORY PREPARATION
+## Purpose
 
-Invoke $jido-core first — it contains ecosystem context,
-conventions, and core design principles. Follow its guidance before proceeding.
+Build focused tests that prove Jido v3 behavior at the cheapest reliable
+layer: action/flow contracts first, direct Agent candidates next, live actor
+commits and effects last.
 
-## Core Principle
+## When To Use
 
-Jido agents are **pure data** — test them without GenServer. Call `cmd/2` on
-agent structs, assert state changes and directives. Only use `AgentServer`
-for integration tests that need signal routing and directive execution.
+Use this skill for:
 
----
+- Tests for Jido actions, flows, or instructions
+- Route selection and generated interface tests
+- Direct candidate tests for agents
+- Live `Jido.AgentServer` tests: commits, queries, cancellation, children
+- Plugin tests at pure and runtime boundaries
+- Directive and effect assertions
+- AI/provider tests without live credentials
+- Improving weak or flaky test coverage
 
-## Step 1: Testing Actions
+Invoke `jido-core` first for shared ecosystem context.
 
-Actions are the simplest unit to test. Call `run/2` directly:
+## Requirements
 
-```elixir
-defmodule MyApp.Actions.IncrementTest do
-  use ExUnit.Case, async: true
+- Inspect existing tests and helpers before adding patterns.
+- Prefer repo-local test helpers and aliases.
+- Avoid live network/provider dependencies in default tests.
+- Keep tests behavior-focused; do not read private runtime state.
+- Use a unique named Jido instance for each live test.
 
-  alias MyApp.Actions.Increment
+## Workflow
 
-  test "increments counter by amount" do
-    params = %{amount: 5}
-    context = %{state: %{counter: 10}}
-
-    assert {:ok, %{counter: 15}} = Increment.run(params, context)
-  end
-
-  test "defaults amount to 1" do
-    params = %{}
-    context = %{state: %{counter: 0}}
-
-    assert {:ok, %{counter: 1}} = Increment.run(params, context)
-  end
-
-  test "rejects negative amounts" do
-    assert {:error, _reason} = Increment.validate_params(%{amount: -1})
-  end
-end
-```
-
-### Validate Params and Output
-
-```elixir
-test "validates input schema" do
-  assert {:ok, %{input: "hello"}} = MyAction.validate_params(%{input: "hello"})
-  assert {:error, _} = MyAction.validate_params(%{input: 123})
-end
-
-test "validates output schema" do
-  assert {:ok, %{result: "ok"}} = MyAction.validate_output(%{result: "ok", byte_count: 2})
-end
-```
-
-### Execute Through Jido.Exec
-
-For full execution with validation and lifecycle hooks:
-
-```elixir
-test "full execution pipeline" do
-  assert {:ok, result} = Jido.Exec.run(MyAction, %{input: "test"}, %{})
-  assert result.processed == true
-end
-```
-
----
-
-## Step 2: Testing Agents
-
-Test agents as pure functions using `cmd/2` on structs:
-
-```elixir
-defmodule MyApp.CounterAgentTest do
-  use ExUnit.Case, async: true
-
-  alias MyApp.CounterAgent
-  alias MyApp.Actions.{Increment, Decrement}
-
-  setup do
-    agent = CounterAgent.new()
-    %{agent: agent}
-  end
-
-  test "new agent has default state", %{agent: agent} do
-    assert agent.state.counter == 0
-    assert agent.state.status == :idle
-  end
-
-  test "cmd/2 with single action", %{agent: agent} do
-    {agent, directives} = CounterAgent.cmd(agent, {Increment, %{amount: 5}})
-
-    assert agent.state.counter == 5
-    assert directives == []
-  end
-
-  test "cmd/2 with action list", %{agent: agent} do
-    {agent, directives} = CounterAgent.cmd(agent, [
-      {Increment, %{amount: 3}},
-      {Increment, %{amount: 7}}
-    ])
-
-    assert agent.state.counter == 10
-    assert directives == []
-  end
-
-  test "cmd/2 returns directives for effects", %{agent: agent} do
-    {_agent, directives} = CounterAgent.cmd(agent, NotifyAction)
-
-    assert [%Jido.Agent.Directive.Emit{} | _] = directives
-  end
-
-  test "set/2 updates state", %{agent: agent} do
-    {:ok, agent} = CounterAgent.set(agent, %{counter: 42})
-    assert agent.state.counter == 42
-  end
-end
-```
-
-### Testing with Custom Initial State
-
-```elixir
-test "agent with initial state" do
-  agent = CounterAgent.new(state: %{counter: 100, status: :active})
-  assert agent.state.counter == 100
-
-  {agent, _} = CounterAgent.cmd(agent, {Decrement, %{amount: 25}})
-  assert agent.state.counter == 75
-end
-```
-
----
-
-## Step 3: Testing Lifecycle Hooks
-
-```elixir
-test "on_before_cmd is called before processing" do
-  agent = HookAgent.new()
-  {agent, _directives} = HookAgent.cmd(agent, SomeAction)
-
-  # Verify hook side-effects in state
-  assert agent.state.hook_called == true
-end
-
-test "on_after_cmd can transform directives" do
-  agent = HookAgent.new()
-  {_agent, directives} = HookAgent.cmd(agent, SomeAction)
-
-  # Verify directives were transformed by hook
-  assert length(directives) > 0
-end
-```
-
----
-
-## Step 4: Testing Plugins
-
-Verify plugin state isolation and signal handling:
-
-```elixir
-defmodule MyApp.AuditPluginTest do
-  use ExUnit.Case, async: true
-
-  test "plugin state is isolated under its state_key" do
-    agent = AgentWithAuditPlugin.new()
-
-    # Plugin state is nested under its key
-    assert agent.state.__audit_log__ == %{entries: []}
-  end
-
-  test "plugin signal handling" do
-    agent = AgentWithAuditPlugin.new()
-    {agent, _} = AgentWithAuditPlugin.cmd(agent, SomeTrackedAction)
-
-    # Verify plugin transformed state
-    assert length(agent.state.__audit_log__.entries) > 0
-  end
-end
-```
-
----
-
-## Step 5: Property-Based Testing with StreamData
-
-Use StreamData for generative testing of actions:
-
-```elixir
-defmodule MyApp.Actions.MathTest do
-  use ExUnit.Case, async: true
-  use ExUnitProperties
-
-  alias MyApp.Actions.Add
-
-  property "addition is commutative" do
-    check all a <- integer(),
-              b <- integer() do
-      assert {:ok, %{result: r1}} = Add.run(%{a: a, b: b}, %{})
-      assert {:ok, %{result: r2}} = Add.run(%{a: b, b: a}, %{})
-      assert r1 == r2
-    end
-  end
-
-  property "counter never goes negative with abs_increment" do
-    check all amounts <- list_of(positive_integer(), min_length: 1) do
-      agent = CounterAgent.new()
-
-      agent =
-        Enum.reduce(amounts, agent, fn amount, acc ->
-          {acc, _} = CounterAgent.cmd(acc, {Increment, %{amount: amount}})
-          acc
-        end)
-
-      assert agent.state.counter > 0
-    end
-  end
-end
-```
-
----
-
-## Step 6: Integration Testing with AgentServer
-
-For tests that need the full OTP runtime, use `JidoTest.Case`:
-
-```elixir
-defmodule MyApp.CounterIntegrationTest do
-  use JidoTest.Case, async: true
-
-  alias Jido.AgentServer
-  alias MyApp.CounterAgent
-
-  test "signal routing through AgentServer", %{jido: jido} do
-    pid = start_server(%{jido: jido}, CounterAgent)
-
-    # Create and send a signal
-    sig = signal("increment", %{amount: 5})
-    :ok = AgentServer.call(pid, sig, 5_000)
-
-    # Check agent state
-    {:ok, state} = AgentServer.state(pid)
-    assert state.agent.state.counter == 5
-  end
-
-  test "async signal processing", %{jido: jido} do
-    pid = start_server(%{jido: jido}, CounterAgent)
-
-    sig = signal("increment", %{amount: 1})
-    :ok = AgentServer.cast(pid, sig)
-
-    # Use eventually for async assertions
-    assert_eventually fn ->
-      {:ok, state} = AgentServer.state(pid)
-      state.agent.state.counter == 1
-    end
-  end
-end
-```
-
-### JidoTest.Case Helpers
-
-| Helper                | Description                                    |
-|-----------------------|------------------------------------------------|
-| `start_server/3`     | Starts AgentServer with auto-cleanup           |
-| `signal/3`           | Creates a test signal with defaults            |
-| `unique_id/1`        | Generates unique ID with prefix                |
-| `test_registry/1`    | Returns registry for test's Jido instance      |
-| `assert_eventually/1`| Polling assertion for async results            |
-
-Each test gets an isolated Jido instance via the `%{jido: jido}` context.
-
----
-
-## Step 7: Mocking External Dependencies
-
-Use Mimic for mocking external services:
-
-```elixir
-# test/test_helper.exs
-Mimic.copy(MyApp.ExternalAPI)
-
-# In test
-defmodule MyApp.WeatherActionTest do
-  use ExUnit.Case, async: true
-  use Mimic
-
-  test "handles API errors gracefully" do
-    stub(MyApp.ExternalAPI, :fetch_weather, fn _location ->
-      {:error, :timeout}
-    end)
-
-    assert {:error, _} = MyApp.Actions.GetWeather.run(%{location: "Tokyo"}, %{})
-  end
-
-  test "returns weather data on success" do
-    expect(MyApp.ExternalAPI, :fetch_weather, fn "Tokyo" ->
-      {:ok, %{temp: 22, conditions: "sunny"}}
-    end)
-
-    assert {:ok, %{temperature: 22}} = MyApp.Actions.GetWeather.run(%{location: "Tokyo"}, %{})
-  end
-end
-```
-
----
-
-## Step 8: Running the Test Suite
+### 1. Inspect test conventions
 
 ```bash
-# Run all tests
-mix test
-
-# Run with coverage
-mix test --cover
-
-# Run specific test file
-mix test test/my_agent_test.exs
-
-# Run specific test by line
-mix test test/my_agent_test.exs:42
-
-# Full quality check (formatting, credo, dialyzer, tests)
-mix quality
+rg "use ExUnit.Case|Jido.start|Jido.start_agent|Jido.Exec.run|use Jido.Action|use Jido.Agent" test lib
+sed -n '1,180p' mix.exs
 ```
 
----
+Record:
 
-## Complete Example: Counter Agent Test Module
+- Test helper modules and async conventions
+- Repo aliases such as `mix quality`
+- Mocking/bypass libraries and provider test strategy
+- Existing runtime test patterns and cleanup style
+
+### 2. Test actions directly
 
 ```elixir
-defmodule MyApp.CounterTest do
-  use ExUnit.Case, async: true
-
-  defmodule IncrementAction do
-    use Jido.Action,
-      name: "increment",
-      schema: [amount: [type: :integer, default: 1]]
-
-    @impl true
-    def run(params, context) do
-      {:ok, %{counter: (context.state[:counter] || 0) + params.amount}}
-    end
-  end
-
-  defmodule DecrementAction do
-    use Jido.Action,
-      name: "decrement",
-      schema: [amount: [type: :integer, default: 1]]
-
-    @impl true
-    def run(params, context) do
-      {:ok, %{counter: (context.state[:counter] || 0) - params.amount}}
-    end
-  end
-
-  defmodule CounterAgent do
-    use Jido.Agent,
-      name: "test_counter",
-      schema: [counter: [type: :integer, default: 0]]
-
-    def signal_routes(_ctx) do
-      [
-        {"increment", IncrementAction},
-        {"decrement", DecrementAction}
-      ]
-    end
-  end
-
-  setup do
-    %{agent: CounterAgent.new()}
-  end
-
-  test "starts at zero", %{agent: agent} do
-    assert agent.state.counter == 0
-  end
-
-  test "increments by default amount", %{agent: agent} do
-    {agent, []} = CounterAgent.cmd(agent, IncrementAction)
-    assert agent.state.counter == 1
-  end
-
-  test "increments by custom amount", %{agent: agent} do
-    {agent, []} = CounterAgent.cmd(agent, {IncrementAction, %{amount: 10}})
-    assert agent.state.counter == 10
-  end
-
-  test "decrements", %{agent: agent} do
-    {agent, []} = CounterAgent.cmd(agent, {IncrementAction, %{amount: 5}})
-    {agent, []} = CounterAgent.cmd(agent, {DecrementAction, %{amount: 3}})
-    assert agent.state.counter == 2
-  end
-
-  test "chains multiple actions", %{agent: agent} do
-    {agent, []} = CounterAgent.cmd(agent, [
-      {IncrementAction, %{amount: 10}},
-      {DecrementAction, %{amount: 3}},
-      {IncrementAction, %{amount: 1}}
-    ])
-    assert agent.state.counter == 8
-  end
-end
+{:ok, params} = Add.validate_params(%{left: 1, right: 2})
+assert {:ok, %{sum: 3}} = Add.run(params, %{})
 ```
 
----
+- A direct `run/2` call skips validation; validate params first when the
+  callback relies on schema defaults.
+- Cover: valid input, invalid input, domain failures, output shape, effects
+  ordering, and caller-visible error structs.
+- Add one `Jido.Exec.run/4` contract test: invalid input is rejected before
+  `run/2`, output is validated, and failures become structured errors such as
+  `Jido.Action.Error.InvalidInputError` (assert on the struct and its
+  `details`, not message text). Exec never retries, so do not test retry
+  counts.
+- Async calls (`Jido.Exec.run_async/4` + `await/1,2`) and Flow step-wise
+  execution (`start` → `continue` → `result`) have their own contracts; test
+  them directly instead of sleeping or polling.
 
-## DO / DON'T
+### 3. Test flows without running them
 
-### DO
+- `Jido.Flow.validate/1` checks structure, references, and cycles;
+  `validate_executable/1` additionally checks Action and child Flow targets.
+- `Jido.Flow.dependencies/1` and `explain/1` show the graph;
+  `Jido.Flow.compile/2` derives the compiled value. None runs work.
+- For stored flows, test a `Jido.Flow.Codec` round trip and expected errors for
+  unknown identifiers.
+- Run behavior through `Jido.Exec.run/4` and assert the complete result and
+  effect order. Results and effects keep canonical order under any
+  `max_concurrency`; assert that order.
+- To prove an action ran or did not run, send a message and use
+  `assert_received` / `refute_received`.
 
-- **Test agents as pure data first.** Use `cmd/2` on structs before involving AgentServer.
-- **Use `async: true`** on all tests that don't share mutable state.
-- **Use `JidoTest.Case`** for integration tests — it provides isolated Jido instances.
-- **Use `assert_eventually`** for async assertions instead of `Process.sleep`.
-- **Test actions in isolation** with `run/2` before testing inside agents.
+### 4. Test agents as data first
 
-### DON'T
+```elixir
+agent = Counter.new!(id: "direct-test")
+{:ok, signal} = Counter.add_signal(3)
 
-- **Start GenServers in unit tests.** Test pure logic first.
-- **Use `Process.sleep`** for timing — use `assert_eventually` or proper await.
-- **Share state between tests.** Each test should create its own agent struct.
-- **Skip schema validation tests.** Verify your schemas reject bad input.
-- **Mock internal Jido modules.** Mock external boundaries only.
+{:ok, candidate, []} = Counter.cmd(agent, signal)
+0 = agent.state.count        # original unchanged
+3 = candidate.state.count    # complete next state
+
+{:ok, invalid} = Counter.add_signal("three")
+{:error, %Jido.Action.Error.InvalidInputError{}} = Counter.cmd(agent, invalid)
+```
+
+For agents, test:
+
+- Initial state defaults and instance validation failures
+- Route selection: exact vs wildcard, no-match `Jido.Error.RoutingError`,
+  route defaults merging
+- Complete next state; unrelated fields survive
+- Plugin-owned keys: executables preserve them; tampering rejects the
+  candidate
+- Directives returned without dispatch
+- Generated interfaces (`name_signal/n`, `name/n`) for exact routes
+
+### 5. Test live actors explicitly
+
+```elixir
+jido = :"test_#{System.unique_integer([:positive])}"
+{:ok, jido_pid} = Jido.start_link(name: jido)
+{:ok, server} = Jido.start_agent(jido, TestGuide.Counter, id: "live-test")
+
+before = Jido.AgentServer.snapshot(server)
+{:ok, committed} = TestGuide.Counter.add(server, 4)
+after_commit = Jido.AgentServer.snapshot(server)
+
+0 = before.state_version
+1 = after_commit.state_version
+^committed = after_commit.agent
+
+monitor = Process.monitor(server)
+:ok = Jido.stop_agent(jido, server)
+assert_receive {:DOWN, ^monitor, :process, ^server, _reason}, 5_000
+:ok = Supervisor.stop(jido_pid)
+```
+
+- Start a unique Jido instance per asynchronous test to prevent registry and
+  runtime state crossing cases.
+- Cover: commit and state-version advance, `status/2`, `children/2`,
+  `send_request/3` + `receive_response/2`, cancellation (`cancel/2`,
+  `cancel_turn/3`), attach/detach idle behavior, and cleanup.
+- Use `Jido.Exec`/Server timeouts and explicit options instead of sleeps.
+- Test `hibernate`/`thaw` through configured persistence when that contract is
+  in scope.
+- Ordering/failure/replacement/cleanup checks use barriers, process monitors,
+  replies, or explicit state barriers — **never** `Process.sleep/1` or a
+  finite `refute_receive` as a completion signal.
+- Capture logs only when log or redaction behavior is the contract
+  (`capture_log: true` or `ExUnit.CaptureLog`).
+
+### 6. Test plugins at both boundaries
+
+- State-only Plugin: test option normalization, `state_spec/1` defaults,
+  Directive validation, and `reduce/2` as ordinary functions. Then run one
+  Agent Turn and verify Plugin-owned and domain fields commit together.
+- Plugin runtime: start under a unique Jido instance and verify its child
+  specification, startup failure behavior, Directive handling, cleanup, and
+  restart behavior through messages or public inspection functions.
+- Direct command tests run pure preparation but not live admission; test
+  admission through a Server.
+
+### 7. Test AI integrations without live providers
+
+- Prefer request/response fixtures, deterministic model adapters, or local
+  HTTP/SSE stubs.
+- Test tool schemas, prompt/instruction rendering, and result parsing as pure
+  units.
+- Run live-provider smoke tests only when explicitly requested and credentials
+  exist; keep them out of the default suite.
+
+### 8. Validate
+
+Run the smallest proof first:
+
+```bash
+mix test path/to/test_file.exs
+```
+
+Then run repo-standard validation. If no alias is documented:
+
+```bash
+mix test
+mix compile --warnings-as-errors
+```
+
+The core jido repo separates larger profiles (`mix test.authoring`,
+`test.system`, `test.services`, `test.examples`, `test.bench`). Run the
+profile that covers the change instead of assuming the default suite proves it.
+
+## Output Expectations
+
+Report:
+
+- Behavior covered at each layer
+- Regression risk addressed
+- Runtime or provider dependencies avoided or required
+- Commands run and their results
+- Remaining coverage gaps
+
+## Guardrails
+
+- Do not add sleeps for async behavior; use replies, monitors, or barriers.
+- Do not make default tests depend on live APIs or credentials.
+- Do not inspect private Server state, `:sys.get_state` shapes, or internal
+  structs; use public queries.
+- Do not test private implementation details when public behavior is enough.
+- Do not weaken existing assertions to pass.
+- Do not skip failing tests without explaining the product risk.
+- Do not leak subscriptions, telemetry handlers, or instances between tests;
+  clean up in `on_exit/1`.
+
+## Reference Docs
+
+- `jido-core/reference/signals.md` for routing and dispatch assertions
+- `jido-core/reference/directives.md` for commit and directive semantics
+- `jido-core/reference/runtime.md` for live actor APIs

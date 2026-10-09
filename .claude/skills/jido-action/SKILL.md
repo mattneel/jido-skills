@@ -1,330 +1,356 @@
 ---
 name: jido-action
 description: >-
-  Create composable, validated Jido Actions using the Action behaviour.
-  Use when defining new actions, working with action schemas, composing
-  action chains, or debugging action execution.
+  Build and maintain composable Jido actions and flows with static Zoi
+  schemas, explicit outputs and effects, predictable errors, and AI-tool
+  compatibility. Use when defining actions, flows, inline steps, instructions,
+  or action execution behavior.
 metadata:
   author: agentjido
-  version: "0.1.0"
+  version: "0.3.3"
 license: Apache-2.0
 ---
 
-# Building Jido Actions
+# Jido Action
 
-## MANDATORY PREPARATION
+## Purpose
 
-Invoke /jido-core first — it contains ecosystem context,
-conventions, and core design principles. Follow its guidance before proceeding.
+Create focused Jido actions, flows, and instructions that are easy to
+validate, compose, execute, test, and expose to agents or tools. This skill
+targets the **published** `jido_action` betas, not the moving `release/v3`
+branch.
 
-## Overview
+## When To Use
 
-A Jido Action is a discrete, composable unit of functionality. Actions are
-defined at **compile-time** with validated schemas and executed via `run/2`.
+Use this skill for:
 
-Actions can be:
-- Called directly with `Jido.Exec.run/3`
-- Composed into chains with `Jido.Exec.Chain`
-- Used inside agents via `cmd/2`
-- Exposed as LLM-callable tools via `to_tool/0`
+- New `use Jido.Action` modules
+- Input/output schema changes
+- `run/2` behavior and error handling
+- `Jido.Exec` execution, timeouts, concurrency, and async calls
+- `use Jido.Flow` graphs: steps, choices, map/reduce, iterate, dispatch
+- Inline actions and steps inside flows or agent routes
+- `Jido.Instruction` construction and execution
+- Converting actions into AI-callable tools
+- Debugging validation or execution failures
 
----
+Invoke `jido-core` first for shared ecosystem context.
 
-## Step 1: Define an Action
+## Requirements
+
+- Inspect local action and flow modules before writing new patterns.
+- Confirm the repo resolves `jido_action ~> 3.0.0-beta.12`. Add the explicit
+  dependency pin (or update the lock): jido beta.1 accepts beta.11, which
+  silently drops Flow effects. With beta.12+ those effects are preserved and,
+  at an Agent boundary, become the command's Directive list.
+- Pin `zoi` to `0.18.7` on a fresh resolve if compilation fails with
+  `Zoi.Types.Default is undefined` (newer zoi releases break the published
+  beta).
+- Use static Zoi schemas for input and output. There is no schema adapter.
+- Pass `timeout:` explicitly on `Jido.Exec.run/4` calls that need a limit.
+- Do not configure retries: the beta `Jido.Exec` never retries, and unknown
+  options (for example `max_attempts:`) are rejected.
+
+## Workflow
+
+### 1. Inspect action conventions
+
+Search before editing:
+
+```bash
+rg "use Jido.Action|use Jido.Flow|Jido.Exec.run|Jido.Instruction" lib test
+```
+
+Record:
+
+- Schema style and output schemas in use
+- Return shapes and error conventions
+- Context keys read by `run/2`
+- Whether actions are invoked directly, through flows, or by agents
+- Tests for validation and execution
+
+### 2. Define the action contract
+
+Before coding, identify:
+
+- Action name (required, non-blank, ≤256 bytes) and description
+- Input schema and expected output schema
+- Error cases and their structured reasons
+- Effects that must defer to the caller
+- Context fields read by `run/2` (caller-owned)
+- Whether the action is safe to expose as an AI tool
+- Idempotency key when an outer runtime may repeat work
+
+Keep actions narrow. Use a Flow for multi-step work.
+
+### 3. Implement the module
 
 ```elixir
-defmodule MyApp.Actions.ProcessData do
+defmodule MyApp.Actions.CreateGreeting do
   use Jido.Action,
-    name: "process_data",
-    description: "Transforms and validates input data",
-    category: "processing",
-    tags: ["data", "transform"],
-    vsn: "1.0.0",
-    schema: [
-      input: [type: :string, required: true, doc: "Raw input data"],
-      format: [type: :atom, default: :json, doc: "Output format"]
-    ],
-    output_schema: [
-      result: [type: :string, required: true],
-      byte_count: [type: :integer, required: true]
-    ]
+    name: "create_greeting",
+    description: "Creates one greeting",
+    schema: Zoi.object(%{name: Zoi.string()}),
+    output_schema: Zoi.object(%{message: Zoi.string()})
 
   @impl true
-  def run(params, _context) do
-    result = transform(params.input, params.format)
-    {:ok, %{result: result, byte_count: byte_size(result)}}
-  end
-
-  defp transform(input, :json), do: Jason.encode!(input)
-  defp transform(input, :text), do: to_string(input)
-end
-```
-
-### Configuration Options
-
-| Option          | Type        | Required | Description                       |
-|-----------------|-------------|----------|-----------------------------------|
-| `name`          | string      | yes      | Snake_case identifier             |
-| `description`   | string      | no       | What the action does              |
-| `category`      | string      | no       | Grouping category                 |
-| `tags`          | list        | no       | Discovery tags                    |
-| `vsn`           | string      | no       | Version                           |
-| `schema`        | keyword     | no       | NimbleOptions or Zoi input schema |
-| `output_schema` | keyword     | no       | NimbleOptions or Zoi output schema|
-
----
-
-## Step 2: Implement run/2
-
-The `run/2` callback receives validated params and a context map:
-
-```elixir
-@impl true
-def run(params, context) do
-  # params — validated against schema, keys are atoms
-  # context — map with execution context (e.g., agent state)
-  {:ok, %{result: "processed"}}
-end
-```
-
-### Return Values
-
-| Return                        | Meaning                              |
-|-------------------------------|--------------------------------------|
-| `{:ok, %{key: value}}`       | Success with state updates           |
-| `{:ok, %{result: v}, extras}`| Success with extras (e.g., directives)|
-| `{:error, reason}`           | Failure                              |
-
-**Validation is open**: only fields in the schema are validated. Unspecified
-fields pass through, enabling action composition without validation conflicts.
-
----
-
-## Step 3: Schema Validation
-
-Schemas validate input params at runtime. Use NimbleOptions types:
-
-```elixir
-schema: [
-  name: [type: :string, required: true, doc: "User name"],
-  age: [type: :integer, default: 0],
-  role: [type: {:in, [:admin, :user, :guest]}, default: :user],
-  tags: [type: {:list, :string}, default: []],
-  metadata: [type: :map, default: %{}]
-]
-```
-
-Or use Zoi schemas (recommended for new code):
-
-```elixir
-schema: Zoi.object(%{
-  name: Zoi.string() |> Zoi.min_length(1),
-  age: Zoi.integer() |> Zoi.min(0) |> Zoi.default(0),
-  role: Zoi.enum([:admin, :user, :guest]) |> Zoi.default(:user)
-})
-```
-
-Validate params programmatically:
-
-```elixir
-{:ok, validated} = MyApp.Actions.ProcessData.validate_params(%{input: "hello"})
-{:ok, validated} = MyApp.Actions.ProcessData.validate_output(%{result: "ok", byte_count: 2})
-```
-
----
-
-## Step 4: Lifecycle Hooks
-
-Actions support optional callbacks for pre/post processing:
-
-```elixir
-defmodule MyApp.Actions.Enriched do
-  use Jido.Action,
-    name: "enriched_action",
-    schema: [value: [type: :integer, required: true]]
-
-  @impl true
-  def on_before_validate_params(params) do
-    # Normalize before validation
-    {:ok, Map.update(params, :value, 0, &abs/1)}
-  end
-
-  @impl true
-  def on_after_validate_params(params) do
-    # Post-validation transforms
-    {:ok, params}
-  end
-
-  @impl true
-  def run(params, _context) do
-    {:ok, %{doubled: params.value * 2}}
-  end
-
-  @impl true
-  def on_after_run(result) do
-    # Post-processing on the result
-    result
-  end
-
-  @impl true
-  def on_error(failed_params, error, _context, _opts) do
-    # Compensation logic on failure
-    {:ok, %{compensated: true, original_error: error}}
+  def run(%{name: name}, context) do
+    prefix = Map.get(context, :prefix, "Hello")
+    {:ok, %{message: prefix <> ", " <> name <> "!"}}
   end
 end
 ```
 
-| Callback                     | When                          | Default        |
-|------------------------------|-------------------------------|----------------|
-| `on_before_validate_params/1`| Before param validation       | passthrough    |
-| `on_after_validate_params/1` | After param validation        | passthrough    |
-| `on_after_run/1`             | After run/2 completes         | passthrough    |
-| `on_error/4`                 | On execution failure          | passthrough    |
+`use Jido.Action` options: `name` (required), `description`, `schema`,
+`output_schema`; unknown options fail compilation. Generated functions:
+`name/0`, `description/0`, `schema/0`, `output_schema/0`,
+`validate_params/1`, `validate_output/1`, plus the `Jido.Executable`
+descriptor used by `Jido.Exec`. The `run/2` callback is required. There is
+no `to_json/0` in the published beta.
 
----
-
-## Step 5: Execute Actions
-
-### Direct Execution with Jido.Exec
+### 4. Return supported shapes
 
 ```elixir
-# Basic execution
-{:ok, result} = Jido.Exec.run(MyApp.Actions.ProcessData, %{input: "hello"})
-
-# With context
-{:ok, result} = Jido.Exec.run(MyApp.Actions.ProcessData, %{input: "hello"}, %{user_id: 1})
-
-# Async execution
-async_ref = Jido.Exec.run_async(MyApp.Actions.ProcessData, %{input: "hello"})
-{:ok, result} = Jido.Exec.await(async_ref)
+{:ok, result}                     # map or Jido.Action.Output
+{:ok, result, effects}            # effects: proper list of opaque requests
+{:error, reason}
+{:error, reason, effects}         # third element is discarded
+{:continue, input, target}        # run `target` next (see below)
 ```
 
-### Action Chains
+- Effects are caller-owned requests. `Jido.Exec` treats each as an opaque
+  value, does not validate or dispatch them, and normalizes `[]` to the
+  two-element success form. `nil` or an improper list fails with
+  `:invalid_effects`.
+- Use `Jido.Action.Output.raw/1`, `stream/1`, or `batch/1` when a success
+  value is intentionally non-map.
+- `{:continue, input, target}` is allowed from a **root Action** and from the
+  expander of a `Jido.Flow.Dispatch` component at the end of a Flow. Other
+  Flow positions reject it. The target is an Action or Flow and owns output
+  validation and the final result.
+- `on_before_validate_params/1` may coerce raw input before Zoi parsing. It
+  must return `{:ok, params}` or `{:error, reason}` and include a final clause
+  that passes other input through. Keep auth, secrets, I/O, retries, and
+  compensation out of it.
 
-Execute multiple actions in sequence — output flows into the next action's input:
+### 5. Execute through Jido.Exec
 
 ```elixir
-alias Jido.Exec.Chain
-
-{:ok, result} = Chain.run(
-  [
-    {ValidateInput, %{raw: data}},
-    {TransformData, %{}},
-    {SaveResult, %{destination: :database}}
-  ],
-  %{},    # initial context
-  []      # options
-)
+Jido.Exec.run(MyApp.Actions.CreateGreeting, %{name: "Ada"}, %{prefix: "Hi"}, timeout: 5_000)
 ```
 
-### Action Closures
+- `Jido.Exec.run/4` validates the target and input, runs the callback in the
+  execution process (or a supervised worker when a timeout is set), validates
+  normal output, and converts raises, throws, exits, and invalid return
+  shapes into structured errors.
+- **Exec does not retry work.** Retryability in an error is information for a
+  higher-level caller.
 
-Pre-apply params and context for deferred execution:
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `timeout` | `:infinity` | Complete-call limit; terminates the execution process and active work |
+| `task_supervisor` | `Jido.Exec.TaskSupervisor` | Local Task.Supervisor for workers and async control |
+| `max_continuations` | `256` | Continuations per complete call (0–10_000) |
+| `max_concurrency` | `8` | Bounds concurrent ready Flow work |
+
+- Unknown options are errors (`max_attempts:`, `max_retries:`, and the old
+  Flow `async:` option are not accepted).
+- `Jido.Exec.start/4` accepts only `task_supervisor` and `max_concurrency`; it
+  starts a paused step-wise Flow execution.
+
+Errors:
+
+- Action boundary: `Jido.Action.Error.InvalidInputError`,
+  `ConfigurationError`, `ExecutionFailureError`, `TimeoutError`,
+  `InternalError`.
+- Flow boundary: `Jido.Flow.Error.InvalidDefinitionError`,
+  `InvalidExecutionError`, `ExecutionFailureError`, `TimeoutError`,
+  `InternalError`.
+- Use `Jido.Action.Error.to_map/1`, `Jido.Flow.Error.to_map/1`, or
+  `Jido.Exec.Error.to_map/1` for the common public error map. It includes
+  `retryable?` information for callers.
+
+### 6. Run asynchronously when the caller must not block
 
 ```elixir
-alias Jido.Exec.Closure
-
-closure = Closure.new(MyAction, %{preset: "value"}, %{env: :prod})
-{:ok, result} = Closure.run(closure, %{additional: "param"})
+handle = Jido.Exec.run_async(executable, input, context, opts)
+{:ok, result} = Jido.Exec.await(handle)        # default wait: 5s
+{:ok, result} = Jido.Exec.await(handle, 10_000)
+:ok = Jido.Exec.cancel(handle)
 ```
 
----
+- `run_async/4` accepts the same targets as `run/4` and returns a handle
+  owned by the calling process. Only that process can await, handle, or
+  cancel it.
+- Use `Jido.Exec.handle_message/2` in a GenServer `handle_info/2`; it returns
+  `{:done, result}` for the exact completion message and `:ignore` otherwise.
+- `await/2` accepts milliseconds or `:infinity`; if the **wait** expires,
+  Exec cancels the work and returns `Jido.Exec.Error.AsyncTimeoutError`. The
+  `timeout:` option on `run_async/4` is different: it bounds target
+  execution.
+- `cancel/1` stops active work; it cannot undo side effects that already
+  completed. A second wait on the same handle returns
+  `Jido.Exec.Error.InvalidHandleError`.
 
-## Step 6: Inside Agents
-
-Actions are the building blocks of agent commands:
-
-```elixir
-# In agent signal_routes
-def signal_routes(_ctx) do
-  [
-    {"data.process", MyApp.Actions.ProcessData},
-    {"data.validate", {MyApp.Actions.Validate, %{strict: true}}}
-  ]
-end
-
-# Direct cmd/2 usage
-{agent, directives} = MyAgent.cmd(agent, {MyApp.Actions.ProcessData, %{input: "data"}})
-```
-
----
-
-## Step 7: AI Tool Integration
-
-Actions can be exposed as LLM-callable tools:
+### 7. Compose with Flows
 
 ```elixir
-# Convert to tool format
-tool_spec = MyApp.Actions.ProcessData.to_tool()
-# => %{
-#   "name" => "process_data",
-#   "description" => "Transforms and validates input data",
-#   "parameters" => %{
-#     "type" => "object",
-#     "properties" => %{
-#       "input" => %{"type" => "string", "description" => "Raw input data"},
-#       "format" => %{"type" => "string", "description" => "Output format"}
-#     },
-#     "required" => ["input"]
-#   }
-# }
-```
+defmodule MyApp.Flows.Quote do
+  use Jido.Flow, name: "quote", schema: Zoi.object(%{quantity: Zoi.integer(), unit_price: Zoi.integer()})
 
-The `schema` and `doc` strings directly map to tool parameter descriptions.
-Use descriptive `doc` values in your schema for best AI tool integration.
+  flow do
+    step "price", action: MyApp.Actions.Price,
+      params: %{quantity: input(:quantity), unit_price: input(:unit_price)}
 
----
+    step "discount", total <- result("price", :total) do
+      {:ok, %{total: total, discounted: div(total * 9, 10)}}
+    end
 
-## Complete Example: Data Pipeline Action
-
-```elixir
-defmodule MyApp.Actions.EnrichUser do
-  use Jido.Action,
-    name: "enrich_user",
-    description: "Enriches a user record with computed fields",
-    schema: [
-      user_id: [type: :integer, required: true, doc: "User ID to enrich"],
-      include_stats: [type: :boolean, default: false, doc: "Include usage statistics"]
-    ],
-    output_schema: [
-      user: [type: :map, required: true],
-      enriched_at: [type: :string, required: true]
-    ]
-
-  @impl true
-  def run(params, context) do
-    user = context.state.users[params.user_id]
-
-    enriched = user
-    |> Map.put(:full_name, "#{user.first_name} #{user.last_name}")
-    |> maybe_add_stats(params.include_stats, context)
-
-    {:ok, %{user: enriched, enriched_at: DateTime.utc_now() |> to_string()}}
-  end
-
-  defp maybe_add_stats(user, false, _ctx), do: user
-  defp maybe_add_stats(user, true, ctx) do
-    Map.put(user, :login_count, length(ctx.state.login_history[user.id] || []))
+    output result("discount")
   end
 end
 ```
 
----
+- Components: `step` (an Action, a child Flow module, or an inline body —
+  a child Flow becomes a `Jido.Flow.Subflow`), `choice`, `map`, `reduce`,
+  `iterate`, `dispatch`. Dependencies come from references and `needs:`;
+  source order alone never creates one.
+- Values: literals, `input(:x)`, `context(:key)`, `result("step", :field)`,
+  and `Jido.Expr` operations (Boolean, comparison, arithmetic, concatenation).
+  Expressions cannot call functions.
+- `schema:` validates input; `output_schema:` validates output. A normal Flow
+  output must be a map; use a `Jido.Action.Output` envelope for intentional
+  raw, stream, batch, or opaque values.
+- Dispatch: at most one, must be last, output is the complete Dispatch
+  result. Dispatch is not available in step-wise execution or as a Subflow.
+- Effects: a Flow collects requests from **all** successful executed
+  components in canonical dependency order (depth, then component name) and
+  returns them with the final output. Failed, timed-out, or cancelled
+  executions return no effect batch. (At an Agent boundary under beta.12+,
+  this batch becomes the command's Directive list — see step 9.)
+- Inspect without running: `Jido.Flow.validate/1`,
+  `validate_executable/1`, `dependencies/1`, `explain/1`,
+  `semantic_identity/1`, `Jido.Flow.compile/2` (`%Jido.Flow.Compiled{}`).
+- Run: `Jido.Exec.run(flow_or_module, input, context, max_concurrency: 4)`
+  (`max_concurrency: 1` for serial scheduling).
+- Step-wise (Flows only):
 
-## DO / DON'T
+  ```elixir
+  {:ok, execution} = Jido.Exec.start(flow_or_instruction, input)
+  {:ok, execution} = Jido.Exec.continue(execution)
+  {:ok, output, effects} = Jido.Exec.result(execution)   # or {:ok, output}
+  ```
 
-### DO
+- Storage: use `Jido.Flow.Codec.encode/2` and `decode/2` with an
+  application-owned `Jido.Flow.Registry`. `Jido.Flow.to_map/1` is for
+  comparison, not the stored format.
 
-- **Name actions with snake_case.** Must contain only letters, numbers, underscores.
-- **Add `doc` to schema fields.** These become tool descriptions for LLM integration.
-- **Return `{:ok, map}` from run/2.** Always return a map of state updates.
-- **Use output_schema** to validate action outputs for downstream consumers.
-- **Keep actions focused.** One action = one logical operation.
+### 8. Use Instructions for deferred calls
 
-### DON'T
+```elixir
+instruction =
+  Jido.Instruction.new!(target: MyApp.Actions.SendEmail, params: %{to: "a@b.com"}, context: %{tenant_id: "t-1"})
 
-- **Define actions at runtime.** `Jido.Action.new()` raises — actions are compile-time only.
-- **Depend on action execution order** unless using explicit chains.
-- **Mutate external state in run/2 inside cmd/2** without understanding the purity boundary — use directives for effects owned by the runtime.
-- **Ignore error returns.** Always pattern match on `{:ok, _}` or `{:error, _}`.
-- **Use overly broad schemas.** Validate what you need; let composition handle the rest.
+Jido.Exec.run(instruction)
+```
+
+- Fields: `target`, `params`, `context`, `metadata`. Targets can be Action
+  modules, Flow modules, or runtime Flow values.
+- Call-site params/context override equal keys (shallow merge); metadata is
+  never execution policy. Instructions accept the Exec options of their
+  target.
+- Only a Flow Instruction supports step-wise execution.
+- Instructions are not a storage format; store flows with `Jido.Flow.Codec`.
+
+### 9. Integrate with an Agent
+
+- The normal Agent result is the complete next domain state based on
+  `context.agent_state`; a partial map is not a patch.
+- Preserve Plugin-owned keys; only the owning Plugin facet's `reduce/2`
+  changes them.
+- Return Directives as the third element; the Server dispatches after commit.
+- One Flow inside one Turn produces at most one commit. Do not split one
+  logical command across live calls unless every intermediate state is valid
+  and useful.
+- Inline route actions use the agent DSL; the route block needs a
+  `signal_source` when it declares `define`:
+
+  ```elixir
+  routes do
+    signal_source "/counters"
+
+    route "counter.add" do
+      action %{amount: amount}, name: "counter_add", schema: Zoi.object(%{amount: Zoi.integer()}), context: context do
+        {:ok, %{context.agent_state | count: context.agent_state.count + amount}}
+      end
+
+      define :add, args: [:amount]
+    end
+  end
+  ```
+
+- Under `jido_action` **beta.12+**, the Flow's collected effects become the
+  Agent command's Directive list: direct `cmd` returns them, and a live Server
+  validates, commits, and dispatches them in Flow effect order. Every entry
+  must be a valid Directive — an ordinary (opaque) effect rejects the Turn
+  before commit (`ValidationError` "Agent executable returned an invalid
+  Directive"). With beta.11 the Agent boundary silently drops Flow effects.
+  For agent-routed Flows, return Directives (or a plain success) and let a
+  Plugin own capability effects.
+
+### 10. Tool compatibility
+
+- A tool is an Action or Flow with a stable name, validated input, and a
+  model-readable result. `name/0`, `description/0`, `schema/0`, and
+  `output_schema/0` are the model-facing contract (for example in `jido_ai`
+  tool declarations).
+- Keep `as:`/tool names short and stable; avoid internal-only structures at
+  the boundary.
+
+### 11. Validate
+
+Run focused action/flow tests first:
+
+```bash
+mix test path/to/action_test.exs
+```
+
+Then run the repo-standard test or quality command. Tests should cover valid
+input, invalid input, domain failures, output shape, effect ordering, and
+caller-visible errors.
+
+## Output Expectations
+
+Report:
+
+- Action/flow contract changed
+- Validation behavior changed
+- Error cases covered
+- Effects and idempotency implications
+- Tool-facing behavior, if any
+- Tests run
+
+## Guardrails
+
+- Do not use v2 APIs: `Jido.Plan`, action chains,
+  `Jido.Action.TaskSupervisor`, built-in retry/compensation policy, or
+  NimbleOptions schemas.
+- Do not use `release/v3`-only APIs with published betas: `to_json/0`,
+  `max_attempts`, `Jido.Exec.start/6` with a Runic.Runner, or
+  `Jido.Instruction.validate/1`. The beta async API is
+  `run_async`/`await`/`cancel`.
+- Do not configure retries in Exec options; own retry policy in the caller
+  and only for idempotent work.
+- Do not use actions as unstructured service objects; one action, one unit of
+  work.
+- Do not swallow errors or return ambiguous values.
+- Do not use the process dictionary or global state.
+- Do not put external effects on the caller's behalf: return them as effect
+  requests or perform them inside the action, never in a Flow expression.
+- Do not expose unsafe filesystem, network, or code-evaluation behavior as a
+  model tool.
+- Do not change return shapes without updating callers and tests.
+
+## Reference Docs
+
+- `jido-core/reference/actions.md` for the condensed execution contract

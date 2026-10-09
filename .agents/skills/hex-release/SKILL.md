@@ -1,303 +1,257 @@
 ---
 name: hex-release
 description: >-
-  Guide interactive Hex package release for AgentJido repositories.
-  Supports automated GitHub Actions and manual release workflows.
-  Use when asked to release, publish to Hex, bump version, or create a new release.
+  Guide human-in-the-loop Hex package releases for AgentJido repositories.
+  Use when preparing, validating, dry-running, publishing, tagging, or
+  dispatching a Hex release workflow.
 metadata:
   author: agentjido
-  version: "0.1.0"
+  version: "0.2.0"
 license: Apache-2.0
-compatibility: Requires mix, git, gh CLI, and Hex.pm credentials
 ---
 
 # Hex Release
 
-Interactive guide for releasing AgentJido packages to Hex.pm. Supports both
-automated (GitHub Actions) and manual release workflows.
+## Purpose
 
-## Pre-flight Checks
+Release an AgentJido Hex package with explicit verification before any push,
+tag, GitHub release, or Hex publish.
 
-Run all pre-flight checks before proceeding with either release path. Stop and
-report if any check fails.
+## When To Use
 
-### 1. Identify Package
+Use this skill for:
+
+- Preparing a new Hex release
+- Bumping package version
+- Running release dry-runs
+- Dispatching `.github/workflows/release.yml`
+- Publishing to Hex.pm
+- Creating or verifying release tags and GitHub releases
+
+Do not use this skill for release-status reporting only. For reporting, inspect
+the workspace release-status tooling instead.
+
+## Requirements
+
+- `mix`, `git`, and `gh` when using the automated workflow
+- Hex credentials locally for actual local publish
+- `HEX_API_KEY` configured in GitHub Actions for workflow publish
+- Clean working tree before release actions
+
+## Workflow
+
+### 1. Identify the package
+
+Read `mix.exs` and record:
+
+- Mix app/package name
+- Current version
+- Whether `git_ops` is configured
+- Release workflow path, normally `.github/workflows/release.yml`
+
+Prefer structured inspection of `mix.exs` over hardcoded package assumptions.
+
+### 2. Check dependency blockers
+
+Inspect `mix.exs` for `github:`, `git:`, and `path:` dependencies.
+
+- Dev/test-only git or path deps do not block Hex publish; note them.
+- Runtime git or path deps block Hex publish; stop and report which deps must
+  be published to Hex or switched to Hex requirements first.
+
+### 3. Verify repository state
+
+Run:
 
 ```bash
-# Read mix.exs to get package name and current version
-grep -E '(version:|@version|app:)' mix.exs
-```
-
-Record the current version and package name for later steps.
-
-### 2. Check for Blocked Dependencies
-
-```bash
-# Look for git or path dependencies that prevent Hex publish
-grep -E '(git:|path:|github:)' mix.exs mix.lock
-```
-
-If any git or path dependencies exist, stop. These must be replaced with
-published Hex dependencies before release.
-
-### 3. Verify Git Status
-
-```bash
-# Must be on main branch with a clean working tree
 git status --porcelain
 git branch --show-current
+git fetch --tags origin
 ```
 
-- Working tree must be clean (no uncommitted changes)
-- Must be on `main` branch
-- Must be up to date with remote: `git pull --ff-only`
+Stop if the working tree is dirty. Warn if the branch is not `main`. Do not
+switch branches or stash work unless the user explicitly asks.
 
-### 4. Check for Releasable Commits
+### 4. Check releasable commits
+
+Run:
 
 ```bash
-# List commits since last tag
-git log $(git describe --tags --abbrev=0 2>/dev/null || echo "HEAD~20")..HEAD --oneline
+git log --oneline $(git describe --tags --abbrev=0 2>/dev/null || echo "")..HEAD
 ```
 
-If there are no commits since the last tag, there is nothing to release.
+If there are no commits since the last tag, stop and report that there is
+nothing to release.
 
-### 5. Run Tests and Quality Checks
+Review commit messages for conventional commit prefixes because `git_ops`
+release notes and version bumps depend on them.
+
+### 5. Validate locally
+
+Run the project-standard checks before release:
 
 ```bash
 mix deps.get
 mix test
-mix quality
 ```
 
-All tests must pass. If `mix quality` is not available, run:
+If the repo documents `mix quality`, run it. If not, run at least:
 
 ```bash
 mix format --check-formatted
-mix credo --strict
-mix dialyzer
+mix compile --warnings-as-errors
 ```
 
-### 6. Dry-Run Hex Publish
+Stop on failures and report the failing command and key error lines.
+
+### 6. Dry-run Hex publish
+
+Run:
 
 ```bash
 mix hex.publish --dry-run
 ```
 
-Review the output carefully:
-- Confirm the listed files are correct (no secrets, no build artifacts)
-- Confirm the package metadata is accurate
-- Confirm the version is what you expect
+Review package metadata and file list for missing files, secrets, build
+artifacts, stale docs, or unexpected package names.
 
-## Path A: Automated Release (GitHub Actions)
+If the dry-run fails only because the local machine is not authenticated to
+Hex, treat that as a local environment limitation. Show the useful metadata
+or file-list output and remind the user that CI still needs `HEX_API_KEY`.
+Stop on any other dry-run failure.
 
-Use this path when the repository has a `release.yml` workflow configured.
+### 7. Choose release path
 
-### 1. Trigger the Release Workflow
+After pre-flight checks pass, show a short summary and ask the user to choose:
+
+- Automated release through GitHub Actions
+- Manual local release
+
+Prefer the automated workflow when `.github/workflows/release.yml` delegates to
+the shared AgentJido release workflow and uses `secrets: inherit`.
+
+## Automated Path
+
+### Confirm workflow
+
+Inspect `.github/workflows/release.yml`. Treat the repo as configured if it
+delegates to an AgentJido shared release workflow and passes compatible inputs.
+Do not rewrite a working wrapper only for cosmetic consistency.
+
+Verify support for these inputs before mentioning them as available:
+
+- `dry_run`
+- `hex_dry_run`
+- `skip_tests`
+- `version_override`
+
+### Run dry-run first
+
+Use GitHub CLI when available:
 
 ```bash
-# Standard release
-gh workflow run release.yml
-
-# With options
 gh workflow run release.yml -f dry_run=true
-gh workflow run release.yml -f hex_dry_run=true
-gh workflow run release.yml -f skip_tests=true
-```
-
-Available flags:
-- `dry_run` — Run the full workflow without publishing or pushing
-- `hex_dry_run` — Run `mix hex.publish --dry-run` instead of actual publish
-- `skip_tests` — Skip the test suite (use only if tests were just run locally)
-
-**Always run with `dry_run=true` first** to verify the workflow completes
-successfully before doing a real release.
-
-### 2. Monitor Workflow Progress
-
-```bash
-# Watch the most recent run
 gh run list --workflow=release.yml --limit=1
 gh run watch
 ```
 
-### 3. Verify Completion
+If the workflow supports an explicit version:
 
 ```bash
-# Check the release was created
-gh release list --limit=1
-
-# Verify the package is on Hex
-mix hex.info <package_name>
+gh workflow run release.yml -f dry_run=true -f version_override=1.2.3
 ```
 
-## Path B: Manual Release
+Review the workflow summary for version bump, changelog, tests, Hex dry-run
+output, tag that would be created, and any publish blockers.
 
-Use this path when GitHub Actions are not available or when you need more
-control over the release process.
+### Run real release
 
-### 1. Preview Version Bump
+Only after the user confirms the dry-run result, dispatch the real release:
 
 ```bash
-# Dry-run to see what version would be created
+gh workflow run release.yml
+```
+
+Use `skip_tests=true` only when CI has already passed and the user explicitly
+accepts that shortcut.
+
+If supported and requested:
+
+```bash
+gh workflow run release.yml -f version_override=1.2.3
+```
+
+Watch the run and verify:
+
+- Tag exists
+- GitHub release exists
+- Hex package version exists
+- `origin/main` contains the release commit when the workflow creates one
+
+## Manual Path
+
+Use the manual path only when the workflow is unavailable, inappropriate for
+the repo, or explicitly requested.
+
+### Preview version
+
+Run:
+
+```bash
 mix git_ops.release --dry-run
 ```
 
-Review the proposed version bump:
-- `fix:` commits → patch bump (0.1.0 → 0.1.1)
-- `feat:` commits → minor bump (0.1.0 → 0.2.0)
-- `BREAKING CHANGE:` → major bump (0.1.0 → 1.0.0)
+Ask the user to confirm the proposed version or provide an override.
 
-If the proposed bump is not what you want, you can force a specific version:
+### Create release commit and tag
+
+After confirmation:
 
 ```bash
-mix git_ops.release --new-version=X.Y.Z --dry-run
+mix git_ops.release --yes
 ```
 
-### 2. Execute Version Bump
+For an explicit version, use the repo-supported `git_ops` override flag after
+checking `mix help git_ops.release`.
+
+Review the release commit, version change, changelog, and tag locally.
+
+### Push and publish
+
+Before pushing, ask for user confirmation. Then:
 
 ```bash
-mix git_ops.release
-# or with a specific version:
-mix git_ops.release --new-version=X.Y.Z
-```
-
-This will:
-- Update the version in `mix.exs`
-- Update `CHANGELOG.md` with categorized commits
-- Create a git commit with the version bump
-- Create a git tag `vX.Y.Z`
-
-### 3. Review CHANGELOG.md
-
-```bash
-# Review the generated changelog entry
-head -50 CHANGELOG.md
-```
-
-Verify:
-- The version header is correct
-- Commit messages are properly categorized
-- No sensitive information is included
-- Breaking changes are clearly documented
-
-If edits are needed:
-
-```bash
-# Amend the release commit with changelog fixes
-# Edit CHANGELOG.md as needed, then:
-git add CHANGELOG.md
-git commit --amend --no-edit
-git tag -f vX.Y.Z
-```
-
-### 4. Push Release
-
-```bash
-# Push the commit and tag
 git push origin main
-git push origin vX.Y.Z
+git push origin --tags
 ```
 
-### 5. Publish to Hex
+Before publishing, ask for user confirmation again. Then:
 
 ```bash
-mix hex.publish
+mix hex.publish --dry-run
+mix hex.publish --yes
 ```
 
-Confirm the publish when prompted. Verify the package is available:
+Create the GitHub release from the tag using generated notes or the changelog,
+depending on the repo convention.
 
-```bash
-mix hex.info <package_name>
-```
+## Output Expectations
 
-### 6. Create GitHub Release
+Report:
 
-```bash
-# Extract the changelog entry for this version
-# Create a GitHub release with the changelog as the body
-gh release create vX.Y.Z \
-  --title "vX.Y.Z" \
-  --notes-file <(awk '/^## v?X\.Y\.Z/{found=1;next} /^## v?[0-9]/{if(found)exit} found' CHANGELOG.md)
-```
+- Package name and current/proposed version
+- Pre-flight result summary
+- Release path used
+- Commands dispatched
+- Final verification status for tag, GitHub release, and Hex package
+- Any blockers that stopped the release
 
-Alternatively, create the release interactively:
+## Guardrails
 
-```bash
-gh release create vX.Y.Z --generate-notes
-```
-
-## Rollback Instructions
-
-### Pre-Push Rollback
-
-If you haven't pushed yet, undo the release commit and tag:
-
-```bash
-git tag -d vX.Y.Z
-git reset --soft HEAD~1
-```
-
-This preserves your changes in the staging area so you can fix and re-release.
-
-### Post-Push Rollback
-
-If you've pushed but haven't published to Hex:
-
-```bash
-# Revert the release commit
-git revert HEAD
-git push origin main
-
-# Delete the remote tag
-git push origin --delete vX.Y.Z
-git tag -d vX.Y.Z
-
-# Delete the GitHub release if created
-gh release delete vX.Y.Z --yes
-```
-
-### Post-Publish Rollback
-
-If you've already published to Hex, you have 24 hours to revert:
-
-```bash
-mix hex.publish --revert X.Y.Z
-```
-
-After 24 hours, a published version cannot be reverted. You must publish a new
-patch version with the fix instead.
-
-Also revert the git and GitHub release:
-
-```bash
-git revert HEAD
-git push origin main
-git push origin --delete vX.Y.Z
-gh release delete vX.Y.Z --yes
-```
-
-## Invocation
-
-```
-$ hex-release
-```
-
-## DO / DON'T
-
-### DO
-
-- Always run `--dry-run` first before any actual release
-- Verify `CHANGELOG.md` is accurate and complete before pushing
-- Run the full test suite before releasing
-- Check for git/path dependencies before attempting Hex publish
-- Confirm you are on `main` with a clean working tree
-- Review the files included in the Hex package during dry-run
-
-### DON'T
-
-- Force-push release commits — use `git revert` instead
-- Skip pre-flight checks, even for "small" releases
-- Release from a branch other than `main`
-- Publish to Hex before pushing the git tag
-- Delete and re-create tags on the remote — this confuses downstream users
-- Release if any git or path dependencies exist in mix.exs
+- Never publish to Hex without explicit user confirmation.
+- Never push release commits or tags without explicit user confirmation.
+- Never ignore runtime git/path dependency blockers.
+- Do not assume `mix quality` exists; inspect the repo first.
+- Do not assume every repo uses `git_ops`; detect it.
+- Hex packages cannot be unpublished after the Hex grace period; prefer dry-runs
+  and workflow verification over speed.
